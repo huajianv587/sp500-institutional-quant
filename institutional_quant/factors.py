@@ -107,7 +107,8 @@ class FactorEngine:
                 SELECT company_id, metric, value, source_file_id, effective_at,
                        ROW_NUMBER() OVER (
                            PARTITION BY company_id, metric
-                           ORDER BY {period_column} DESC, effective_at DESC
+                           ORDER BY {period_column} DESC, effective_at DESC,
+                                    as_of_date DESC, ingested_at DESC
                        ) AS rn
                 FROM {table}
                 WHERE effective_at <= ? AND as_of_date <= ?

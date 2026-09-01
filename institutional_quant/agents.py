@@ -211,12 +211,20 @@ class EvidencePacketBuilder:
             """
             WITH observations AS (
                 SELECT company_id, metric AS field, value, unit, effective_at, source_file_id,
-                       ROW_NUMBER() OVER (PARTITION BY company_id, metric ORDER BY period_end DESC, effective_at DESC) AS rn
+                       ROW_NUMBER() OVER (
+                           PARTITION BY company_id, metric
+                           ORDER BY period_end DESC, effective_at DESC,
+                                    as_of_date DESC, ingested_at DESC
+                       ) AS rn
                 FROM fundamentals
                 WHERE company_id = ? AND effective_at <= ? AND as_of_date <= ?
                 UNION ALL
                 SELECT company_id, metric AS field, value, unit, effective_at, source_file_id,
-                       ROW_NUMBER() OVER (PARTITION BY company_id, metric ORDER BY fiscal_period DESC, effective_at DESC) AS rn
+                       ROW_NUMBER() OVER (
+                           PARTITION BY company_id, metric
+                           ORDER BY fiscal_period DESC, effective_at DESC,
+                                    as_of_date DESC, ingested_at DESC
+                       ) AS rn
                 FROM estimates
                 WHERE company_id = ? AND effective_at <= ? AND as_of_date <= ?
             )

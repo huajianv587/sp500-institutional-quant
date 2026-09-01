@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     unit VARCHAR,
     source_file_id VARCHAR NOT NULL,
     ingested_at TIMESTAMP NOT NULL,
-    PRIMARY KEY (company_id, period_end, period_type, effective_at, metric)
+    PRIMARY KEY (company_id, period_end, period_type, effective_at, as_of_date, metric)
 );
 
 CREATE TABLE IF NOT EXISTS estimates (
@@ -385,6 +385,50 @@ class DuckDBStore:
     def initialize(self) -> None:
         with self.connect() as connection:
             connection.execute(DDL)
+            self._migrate_fundamentals_snapshot_key(connection)
+
+    @staticmethod
+    def _migrate_fundamentals_snapshot_key(
+        connection: duckdb.DuckDBPyConnection,
+    ) -> None:
+        info = connection.execute("PRAGMA table_info('fundamentals')").df()
+        primary_key = set(info.loc[info["pk"] > 0, "name"].astype(str))
+        if "as_of_date" in primary_key:
+            return
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            connection.execute("DROP TABLE IF EXISTS fundamentals__snapshot_key")
+            connection.execute(
+                """
+                CREATE TABLE fundamentals__snapshot_key (
+                    company_id VARCHAR NOT NULL,
+                    ticker VARCHAR NOT NULL,
+                    period_end DATE NOT NULL,
+                    period_type VARCHAR NOT NULL,
+                    effective_at TIMESTAMP NOT NULL,
+                    as_of_date DATE NOT NULL,
+                    metric VARCHAR NOT NULL,
+                    value DOUBLE,
+                    unit VARCHAR,
+                    source_file_id VARCHAR NOT NULL,
+                    ingested_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (
+                        company_id, period_end, period_type, effective_at, as_of_date, metric
+                    )
+                )
+                """
+            )
+            connection.execute(
+                "INSERT INTO fundamentals__snapshot_key SELECT * FROM fundamentals"
+            )
+            connection.execute("DROP TABLE fundamentals")
+            connection.execute(
+                "ALTER TABLE fundamentals__snapshot_key RENAME TO fundamentals"
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            raise
 
     def execute(self, sql: str, parameters: list[Any] | tuple[Any, ...] | None = None) -> None:
         with self.connect() as connection:
@@ -736,7 +780,14 @@ POSTGRES_DDL = DDL.replace(" JSON", " JSONB").replace("DOUBLE", "DOUBLE PRECISIO
 POSTGRES_CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     "instruments": ("company_id", "effective_at"),
     "index_membership": ("company_id", "index_code", "member_from"),
-    "fundamentals": ("company_id", "period_end", "period_type", "effective_at", "metric"),
+    "fundamentals": (
+        "company_id",
+        "period_end",
+        "period_type",
+        "effective_at",
+        "as_of_date",
+        "metric",
+    ),
     "estimates": ("company_id", "fiscal_period", "effective_at", "metric"),
     "prices": ("company_id", "price_date", "source"),
     "ownership": ("company_id", "effective_at"),

@@ -161,6 +161,85 @@ def test_symbol_and_sector_are_point_in_time(tmp_path) -> None:
     assert (new.ticker, new.sector) == ("NEW", "Technology")
 
 
+def test_duckdb_migrates_fundamental_primary_key_without_losing_rows(tmp_path) -> None:
+    import duckdb
+
+    path = tmp_path / "legacy.duckdb"
+    connection = duckdb.connect(str(path))
+    connection.execute(
+        """
+        CREATE TABLE fundamentals (
+            company_id VARCHAR NOT NULL, ticker VARCHAR NOT NULL, period_end DATE NOT NULL,
+            period_type VARCHAR NOT NULL, effective_at TIMESTAMP NOT NULL,
+            as_of_date DATE NOT NULL, metric VARCHAR NOT NULL, value DOUBLE, unit VARCHAR,
+            source_file_id VARCHAR NOT NULL, ingested_at TIMESTAMP NOT NULL,
+            PRIMARY KEY (company_id, period_end, period_type, effective_at, metric)
+        )
+        """
+    )
+    connection.execute(
+        """
+        INSERT INTO fundamentals VALUES (
+            'C1', 'ONE', DATE '2020-12-31', 'FY', TIMESTAMP '2021-02-15 23:59:59',
+            DATE '2021-08-31', 'revenue', 100, NULL, 'src', TIMESTAMP '2021-09-01'
+        )
+        """
+    )
+    connection.close()
+
+    store = DuckDBStore(path)
+    store.initialize()
+
+    info = store.query_df("PRAGMA table_info('fundamentals')")
+    primary_key = set(info.loc[info["pk"] > 0, "name"].astype(str))
+    assert "as_of_date" in primary_key
+    assert store.query_df("SELECT COUNT(*) AS count FROM fundamentals").iloc[0]["count"] == 1
+
+
+def test_fundamental_snapshot_versions_are_visible_only_after_their_as_of_date(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "fundamental-versions.duckdb")
+    store.initialize()
+    base = {
+        "company_id": "C1",
+        "ticker": "ONE",
+        "period_end": date(2020, 12, 31),
+        "period_type": "FY",
+        "effective_at": datetime(2021, 2, 15, 23, 59),
+        "metric": "revenue",
+        "unit": None,
+        "source_file_id": "src",
+        "ingested_at": datetime(2021, 10, 1),
+    }
+    snapshots = pd.DataFrame(
+        [
+            {**base, "as_of_date": date(2021, 8, 31), "value": 100.0},
+            {**base, "as_of_date": date(2021, 9, 30), "value": 110.0},
+        ]
+    )[
+        [
+            "company_id",
+            "ticker",
+            "period_end",
+            "period_type",
+            "effective_at",
+            "as_of_date",
+            "metric",
+            "value",
+            "unit",
+            "source_file_id",
+            "ingested_at",
+        ]
+    ]
+    store.insert_frame("fundamentals", snapshots)
+    engine = FactorEngine(store)
+
+    august, _ = engine._latest_metrics("fundamentals", date(2021, 8, 31))
+    september, _ = engine._latest_metrics("fundamentals", date(2021, 9, 30))
+
+    assert august.iloc[0]["revenue"] == pytest.approx(100.0)
+    assert september.iloc[0]["revenue"] == pytest.approx(110.0)
+
+
 def test_current_snapshot_metrics_are_not_visible_before_their_as_of_date(tmp_path) -> None:
     store = DuckDBStore(tmp_path / "metric-asof.duckdb")
     store.initialize()
@@ -530,6 +609,82 @@ def test_ciq_current_column_is_not_relabelled_as_a_historical_snapshot(tmp_path)
     imported = store.query_df("SELECT as_of_date, value FROM estimates").iloc[0]
     assert imported["as_of_date"] == pd.Timestamp("2021-08-31")
     assert imported["value"] == pytest.approx(5.25)
+
+
+def test_ciq_multi_as_of_fundamentals_pair_period_and_filing_date(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "historical_fundamentals.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["=SPGTable(1)", None, None, None, None, None, None, None])
+    sheet.append(
+        [
+            '=SPGLabel(1,267961,"")',
+            '=SPGLabel(1,331277,"")',
+            '=SPGLabel(1,329288,"FY0","08/31/2021")',
+            '=SPGLabel(1,329288,"FY0","09/30/2021")',
+            '=SPGLabel(1,329317,"FY0","08/31/2021")',
+            '=SPGLabel(1,329317,"FY0","09/30/2021")',
+            '=SPGLabel(1,329318,"FY0","08/31/2021")',
+            '=SPGLabel(1,329318,"FY0","09/30/2021")',
+        ]
+    )
+    sheet.append([None] * 8)
+    sheet.append([None] * 8)
+    sheet.append(
+        [
+            "SP_ENTITY_ID",
+            "SP_EXCHANGE_TICKER",
+            "IQ_TOTAL_REV",
+            "IQ_TOTAL_REV",
+            "IQ_PERIOD_END",
+            "IQ_PERIOD_END",
+            "IQ_FINL_FILING_DATE",
+            "IQ_FINL_FILING_DATE",
+        ]
+    )
+    sheet.append([None, None, "FY0", "FY0", "FY0", "FY0", "FY0", "FY0"])
+    sheet.append(
+        [
+            123456,
+            "NYSE:EXM",
+            100.0,
+            110.0,
+            "2020-12-31",
+            "2020-12-31",
+            "2021-02-15",
+            "2021-02-15",
+        ]
+    )
+    workbook.save(source)
+
+    store = DuckDBStore(tmp_path / "historical-fundamentals.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.FUNDAMENTALS)
+
+    assert result.imported_rows == 2
+    imported = store.query_df(
+        "SELECT period_end, period_type, effective_at, as_of_date, metric, value "
+        "FROM fundamentals ORDER BY as_of_date"
+    )
+    assert imported["period_end"].tolist() == [
+        pd.Timestamp("2020-12-31"),
+        pd.Timestamp("2020-12-31"),
+    ]
+    assert imported["period_type"].tolist() == ["FY", "FY"]
+    assert imported["effective_at"].tolist() == [
+        pd.Timestamp("2021-02-15 23:59:59.999999"),
+        pd.Timestamp("2021-02-15 23:59:59.999999"),
+    ]
+    assert imported["as_of_date"].tolist() == [
+        pd.Timestamp("2021-08-31"),
+        pd.Timestamp("2021-09-30"),
+    ]
+    assert imported["metric"].tolist() == ["revenue", "revenue"]
+    assert imported["value"].tolist() == pytest.approx([100.0, 110.0])
 
 
 def test_mixed_ciq_period_codes_are_applied_per_metric() -> None:

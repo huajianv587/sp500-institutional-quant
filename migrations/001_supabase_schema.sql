@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS fundamentals (
     unit VARCHAR,
     source_file_id VARCHAR NOT NULL,
     ingested_at TIMESTAMP NOT NULL,
-    PRIMARY KEY (company_id, period_end, period_type, effective_at, metric)
+    PRIMARY KEY (company_id, period_end, period_type, effective_at, as_of_date, metric)
 );
 
 CREATE TABLE IF NOT EXISTS estimates (

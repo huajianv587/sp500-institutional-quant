@@ -746,6 +746,119 @@ class CapitalIQImporter:
         return pd.concat(observations, ignore_index=True)
 
     @staticmethod
+    def _expand_historical_fundamental_snapshots(
+        frame: pd.DataFrame, source_metadata: dict[str, object]
+    ) -> pd.DataFrame:
+        """Pair each historical fundamental value with its period and filing date."""
+        raw_columns = source_metadata.get("embedded_columns")
+        if not isinstance(raw_columns, list):
+            return frame
+        dated = [
+            item
+            for item in raw_columns
+            if isinstance(item, dict)
+            and isinstance(item.get("column"), str)
+            and isinstance(item.get("as_of_date"), str)
+            and item["column"] in frame.columns
+        ]
+        dated_header_keys = {str(item.get("header_key")) for item in dated}
+        has_current_sibling = any(
+            isinstance(item, dict)
+            and item.get("as_of") == "current"
+            and str(item.get("header_key")) in dated_header_keys
+            for item in raw_columns
+        )
+        if len({str(item["as_of_date"]) for item in dated}) < 2 and not has_current_sibling:
+            return frame
+
+        period_aliases = set(ALIASES["period_end"])
+        filing_aliases = set(ALIASES["effective_at"])
+        period_columns = [
+            item for item in dated if str(item.get("header_key")) in period_aliases
+        ]
+        filing_columns = [
+            item for item in dated if str(item.get("header_key")) in filing_aliases
+        ]
+        identity_canonicals = {
+            "company_id",
+            "ticker",
+            "company_name",
+            "sector",
+            "currency",
+            "unit",
+        }
+        identity_aliases = {
+            alias
+            for canonical in identity_canonicals
+            for alias in ALIASES.get(canonical, ())
+        }
+        identity_columns = [
+            str(column) for column in frame.columns if _column_key(column) in identity_aliases
+        ]
+        observation_rows = (
+            frame[identity_columns].notna().any(axis=1)
+            if identity_columns
+            else pd.Series(True, index=frame.index)
+        )
+        source_rows = frame.loc[observation_rows]
+        metadata_aliases = identity_aliases | period_aliases | filing_aliases
+        value_columns = [
+            item for item in dated if str(item.get("header_key")) not in metadata_aliases
+        ]
+        if not value_columns:
+            return frame
+
+        def companion_for(
+            candidates: list[dict[str, object]], *, as_of_date: str, period_code: str
+        ) -> dict[str, object] | None:
+            return next(
+                (
+                    candidate
+                    for candidate in candidates
+                    if candidate.get("as_of_date") == as_of_date
+                    and (
+                        not period_code
+                        or not candidate.get("period_code")
+                        or candidate.get("period_code") == period_code
+                    )
+                ),
+                None,
+            )
+
+        observations: list[pd.DataFrame] = []
+        for item in value_columns:
+            as_of_date = str(item["as_of_date"])
+            period_code = str(item.get("period_code", ""))
+            period = companion_for(
+                period_columns, as_of_date=as_of_date, period_code=period_code
+            )
+            filing = companion_for(
+                filing_columns, as_of_date=as_of_date, period_code=period_code
+            )
+            selected = source_rows[identity_columns].copy()
+            selected["as_of_date"] = as_of_date
+            selected["period_end"] = (
+                source_rows[str(period["column"])] if period is not None else None
+            )
+            selected["effective_at"] = (
+                source_rows[str(filing["column"])] if filing is not None else None
+            )
+            selected["metric"] = str(item.get("source_header", item["column"]))
+            selected["value"] = source_rows[str(item["column"])]
+            observations.append(selected)
+
+        source_metadata["historical_snapshot_dates"] = sorted(
+            {str(item["as_of_date"]) for item in value_columns}
+        )
+        source_metadata["fundamental_availability_source"] = (
+            "same_as_of_spg_financial_filing_date_by_column"
+        )
+        source_metadata["fundamental_period_policy"] = (
+            "pair_same_as_of_and_period_code_companion"
+        )
+        return pd.concat(observations, ignore_index=True)
+
+    @staticmethod
     def _wide_to_long(frame: pd.DataFrame, dataset: DatasetKind) -> pd.DataFrame:
         if dataset not in {DatasetKind.FUNDAMENTALS, DatasetKind.ESTIMATES}:
             return frame
@@ -882,7 +995,9 @@ class CapitalIQImporter:
         if date_only_availability:
             source_metadata["effective_at_granularity"] = "date"
             source_metadata["date_only_availability_policy"] = "end_of_day"
-        if dataset is DatasetKind.ESTIMATES:
+        if dataset is DatasetKind.FUNDAMENTALS:
+            frame = self._expand_historical_fundamental_snapshots(frame, source_metadata)
+        elif dataset is DatasetKind.ESTIMATES:
             frame = self._expand_historical_estimate_snapshots(frame, source_metadata)
             if source_metadata.get("historical_snapshot_dates"):
                 date_only_availability = True
