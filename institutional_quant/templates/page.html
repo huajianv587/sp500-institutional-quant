@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Institutional Quant</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand"><span>IQ</span><div>Institutional<br>Quant</div></div>
+    <nav>
+      {% for href, key, label in [
+        ('/data-status','data-status','Data Status'),('/factor-lab','factor-lab','Factor Lab'),
+        ('/research-runs','research-runs','Research Runs'),('/debate','debate','Debate'),
+        ('/portfolio','portfolio','Portfolio'),('/backtest','backtest','Backtest'),
+        ('/paper-trading','paper-trading','Paper Trading')] %}
+      <a href="{{ href }}" class="{% if slug == key %}active{% endif %}">{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <div class="sidebar-note"><span class="dot"></span> Local app<br><small>Supabase · Alpaca paper only</small></div>
+  </aside>
+  <main>
+    <header>
+      <div><p class="eyebrow">S&amp;P 500 RESEARCH SYSTEM</p><h1>{{ slug|replace('-', ' ')|title }}</h1></div>
+      <div class="badges"><span>{{ database_backend|upper }}</span><span class="safe">PAPER ONLY</span></div>
+    </header>
+
+    {% if slug == 'data-status' %}
+    <section class="{% if certified %}success{% else %}warning{% endif %}">
+      <b>{% if certified %}Five-year research gate passed{% else %}Five-year research gate is not ready{% endif %}</b>
+      {% if certification_notes %}<ul class="compact-list">{% for note in certification_notes %}<li>{{ note }}</li>{% endfor %}</ul>{% endif %}
+    </section>
+    <section class="grid stats">
+      <article><p>Imported datasets</p><strong>{{ sources|length }}</strong><small>Immutable source manifests</small></article>
+      <article><p>Quality issues</p><strong>{{ issues|length }}</strong><small>Latest 25 checks</small></article>
+      <article><p>Database</p><strong>{{ database_backend|title }}</strong><small>Production analytical store</small></article>
+      <article><p>Execution</p><strong>Paper</strong><small>Live orders disabled by design</small></article>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Source provenance</h2><span>Capital IQ exports</span></div>
+      <table><thead><tr><th>Dataset</th><th>Files</th><th>Rows</th><th>Latest import</th></tr></thead><tbody>
+      {% for row in sources %}<tr><td>{{ row.dataset }}</td><td>{{ row.files }}</td><td>{{ row.rows }}</td><td>{{ row.latest_import }}</td></tr>
+      {% else %}<tr><td colspan="4" class="empty">No licensed exports imported yet.</td></tr>{% endfor %}
+      </tbody></table>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Import a Capital IQ export</h2><span>Local upload · immutable archive · SHA-256</span></div>
+      <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
+        <label>Dataset<select name="dataset" required>
+          <option value="instruments">Instruments / current universe</option>
+          <option value="index_membership">Historical S&amp;P 500 membership</option>
+          <option value="fundamentals">Financial statements / fundamentals</option>
+          <option value="estimates">Consensus estimates / revisions</option>
+          <option value="prices">Adjusted prices / corporate actions</option>
+          <option value="ownership">Ownership</option>
+          <option value="insider_transactions">Insider transactions</option>
+        </select></label>
+        <label>Capital IQ CSV/XLSX<input name="file" type="file" accept=".csv,.xlsx,.xls" required></label>
+        <label>Current snapshot as-of (instruments only)<input name="current_snapshot_as_of" type="date"></label>
+        <label>Observed at (instruments only)<input name="current_snapshot_effective_at" type="datetime-local"></label>
+        <button type="submit">Validate and import</button>
+      </form>
+      <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Data quality</h2><span>Point-in-time gates</span></div>
+      {% for issue in issues %}<div class="issue {{ issue.severity }}"><b>{{ issue.code }}</b><span>{{ issue.message }}</span></div>
+      {% else %}<div class="empty">No recorded issues. Certification still requires every required dataset and availability timestamp.</div>{% endfor %}
+    </section>
+
+    {% elif slug == 'factor-lab' %}
+    {% if factor_readiness %}
+    <section class="grid stats">
+      <article><p>As of</p><strong class="small-strong">{{ factor_readiness.as_of_date }}</strong><small>Latest price session</small></article>
+      <article><p>Universe</p><strong>{{ factor_readiness.companies }}</strong><small>Point-in-time members</small></article>
+      <article><p>Investable scores</p><strong>{{ factor_readiness.investable }}</strong><small>Requires 4/6 families and 2 institutional</small></article>
+      <article><p>Institutional coverage</p><strong>{{ factor_readiness.family_coverage.value }}/{{ factor_readiness.family_coverage.quality }}/{{ factor_readiness.family_coverage.growth }}/{{ factor_readiness.family_coverage.revisions }}</strong><small>Value / quality / growth / revisions</small></article>
+    </section>
+    {% endif %}
+    <section class="panel"><div class="panel-title"><h2>Latest sector-neutral ranking</h2><span>Value · Quality · Growth · Revisions · Momentum · Low risk</span></div>
+      <table><thead><tr><th>Rank</th><th>Ticker</th><th>Sector</th><th>Composite score</th></tr></thead><tbody>
+      {% for row in factors %}<tr><td>{{ loop.index }}</td><td><b>{{ row.ticker }}</b></td><td>{{ row.sector }}</td><td>{{ '%.3f'|format(row.factor_score) }}</td></tr>
+      {% else %}<tr><td colspan="4" class="empty">Import membership, fundamentals, estimates and prices to populate the Factor Lab.</td></tr>{% endfor %}
+      </tbody></table>
+    </section>
+
+    {% elif slug == 'research-runs' %}
+    <section class="panel"><div class="panel-title"><h2>Research jobs</h2><span>Evidence packets and model fingerprints</span></div>
+      <table><thead><tr><th>Run ID</th><th>As of</th><th>Created</th></tr></thead><tbody>
+      {% for row in research_runs %}<tr><td class="mono">{{ row.run_id }}</td><td>{{ row.as_of_date }}</td><td>{{ row.created_at }}</td></tr>
+      {% else %}<tr><td colspan="3" class="empty">No research runs yet.</td></tr>{% endfor %}
+      </tbody></table>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Model benchmark</h2><span>Quality first</span></div>
+      <table><thead><tr><th>Model</th><th>Reasoning</th><th>Schema</th><th>Evidence</th><th>Stability</th><th>Selected</th></tr></thead><tbody>
+      {% for row in benchmarks %}<tr><td>{{ row.model }}</td><td>{{ row.reasoning_effort }}</td><td>{{ '%.1f%%'|format(row.schema_success_rate*100) }}</td><td>{{ '%.1f%%'|format(row.evidence_coverage*100) }}</td><td>{{ '%.1f%%'|format(row.rating_stability*100) }}</td><td>{{ row.selected_for|title if row.selected_for else 'No' }}</td></tr>
+      {% else %}<tr><td colspan="6" class="empty">No frozen model benchmark completed.</td></tr>{% endfor %}
+      </tbody></table>
+    </section>
+
+    {% elif slug == 'debate' %}
+    <section class="panel"><div class="panel-title"><h2>Consensus decisions</h2><span>Independent analysts · two-round debate · judge</span></div>
+      <div class="cards">
+      {% for row in decisions %}<article class="decision"><div><b>{{ row.ticker }}</b><span class="rating">{{ row.rating }}</span></div><p>{{ row.summary }}</p><small>Adjustment {{ '%+.3f'|format(row.score_adjustment) }} · {{ row.supporting_evidence|length }} evidence links</small></article>
+      {% else %}<div class="empty">No evidence-grounded debate has completed.</div>{% endfor %}
+      </div>
+    </section>
+
+    {% elif slug == 'portfolio' %}
+    <section class="grid stats">
+      <article><p>Status</p><strong>{{ portfolio.status|title if portfolio else 'Empty' }}</strong><small>Deterministic optimizer</small></article>
+      <article><p>Holdings</p><strong>{{ portfolio.positions|length if portfolio else 0 }}</strong><small>Target range 20–30</small></article>
+      <article><p>Target volatility</p><strong>{{ '%.0f%%'|format(portfolio.target_volatility*100) if portfolio else '12%' }}</strong><small>Annualized</small></article>
+      <article><p>Turnover</p><strong>{{ '%.1f%%'|format(portfolio.one_way_turnover*100) if portfolio else '—' }}</strong><small>One way</small></article>
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Current recommendation</h2><span>Max 5% per name</span></div>
+      <table><thead><tr><th>Ticker</th><th>Sector</th><th>Weight</th><th>Score</th></tr></thead><tbody>
+      {% if portfolio %}{% for row in portfolio.positions %}<tr><td><b>{{ row.ticker }}</b></td><td>{{ row.sector }}</td><td>{{ '%.2f%%'|format(row.weight*100) }}</td><td>{{ '%.3f'|format(row.score) }}</td></tr>{% endfor %}
+      {% else %}<tr><td colspan="4" class="empty">No portfolio recommendation exists.</td></tr>{% endif %}
+      </tbody></table>
+    </section>
+
+    {% elif slug == 'backtest' %}
+    <section class="panel"><div class="panel-title"><h2>Walk-forward performance</h2><span>Next-session execution · costs included</span></div>
+      {% if chart %}<div class="chart">{{ chart|safe }}</div>{% else %}<div class="empty large">Run a point-in-time backtest to populate this chart.</div>{% endif %}
+    </section>
+    <section class="panel"><div class="panel-title"><h2>Completed studies</h2><span>No performance target is forced</span></div>
+      <table><thead><tr><th>ID</th><th>Window</th><th>Cost</th><th>Certified</th></tr></thead><tbody>
+      {% for row in backtests %}<tr><td class="mono">{{ row.backtest_id }}</td><td>{{ row.spec.start_date }} → {{ row.spec.end_date }}</td><td>{{ row.spec.transaction_cost_bps }} bps</td><td>{{ row.certified_point_in_time }}</td></tr>
+      {% else %}<tr><td colspan="4" class="empty">No completed backtests.</td></tr>{% endfor %}
+      </tbody></table>
+    </section>
+
+    {% elif slug == 'paper-trading' %}
+    <section class="warning"><b>Simulation boundary</b><p>Only <span class="mono">paper-api.alpaca.markets</span> is accepted. Every order requires a five-minute preview and explicit approval. Paper fills and IEX data may differ from live execution.</p></section>
+    <section class="panel"><div class="panel-title"><h2>Order workflow</h2><span>Preview → inspect → approve</span></div>
+      <ol class="workflow"><li>Create deterministic target weights.</li><li>Preview paper-only share deltas and estimated notionals.</li><li>Approve the unchanged preview within five minutes.</li><li>Synchronize simulated fills during the daily monitor.</li></ol>
+    </section>
+    {% endif %}
+  </main>
+  {% if slug == 'data-status' %}
+  <script>
+    document.getElementById('ciq-import-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const result = document.getElementById('ciq-import-result');
+      result.textContent = 'Validating and importing…';
+      try {
+        const response = await fetch(event.currentTarget.action, {
+          method: 'POST', body: new FormData(event.currentTarget)
+        });
+        const payload = await response.json();
+        result.textContent = JSON.stringify(payload, null, 2);
+        result.className = 'import-result ' + (response.ok ? 'ok' : 'failed');
+      } catch (error) {
+        result.textContent = String(error);
+        result.className = 'import-result failed';
+      }
+    });
+  </script>
+  {% endif %}
+</body>
+</html>

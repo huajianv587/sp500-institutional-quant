@@ -1,0 +1,16 @@
+S&P 500 Institutional Multi-Agent Quant Platform
+
+This project is derived from TradingAgents by Tauric Research, licensed under
+the Apache License, Version 2.0. The upstream source was pinned at commit
+2448d0a12576f9b2ddcd5980a0630833423d1e1b before institutional-data and
+portfolio-platform extensions were added.
+
+S&P Capital IQ Pro and S&P Global are trademarks of their respective owners.
+No S&P data is distributed with this repository. Alpaca and DeepSeek are used
+only through user-supplied credentials and remain subject to their own terms.
+
+The optional public point-in-time membership fallback downloads data derived
+from pitindex by Ariel Nacamulli, pinned at commit
+c3d5d4961076a59041b3e1de90fe5ea052f61bb4, under the MIT License. Its
+immutable downloaded bundle includes the upstream licence and is augmented by
+source-linked S&P Global and SEC announcements. It is not Capital IQ data.

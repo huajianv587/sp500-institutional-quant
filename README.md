@@ -1,3 +1,190 @@
+# S&P 500 Institutional Multi-Agent Quant Platform
+
+An English-language, local-first research system that extends TradingAgents with point-in-time Capital IQ ingestion, deterministic factor/ML portfolio construction, evidence-grounded LangGraph debate, quality-first DeepSeek routing, Supabase Postgres research persistence, a local Parquet market-data lake and Alpaca paper-only execution.
+
+## Project status
+
+The application, database schema, deterministic engines, Agent graph, API, UI and
+paper-trading safety boundary are implemented. The repository is still in the
+**data-completion phase**, not the final investment-result phase: a current
+Capital IQ snapshot cannot certify a five-year point-in-time study. The final
+case study and GitHub release remain gated on historical fundamentals, monthly
+estimate snapshots, the model benchmark and the 24-month debate ablation. The
+2017–2026 adjusted-price warm-up and study window is now populated and quality
+checked, but it remains an explicitly labelled Yahoo/Alpaca substitute until a
+licensed Capital IQ price export is available.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    CIQ[Capital IQ Pro exports] --> RAW[Immutable local archive + SHA-256]
+    PUBLIC[Labelled public membership fallback] --> RAW
+    MARKET[Yahoo adjusted history + Alpaca IEX] --> RAW
+    RAW --> GATE[Schema, provenance and point-in-time gates]
+    GATE --> DB[(Supabase Postgres\ninstitutional observations + research state)]
+    GATE --> LAKE[(Local Parquet\nhigh-volume adjusted prices)]
+    DB --> FACTOR[Sector-neutral factor registry]
+    LAKE --> FACTOR
+    DB --> ML[Walk-forward ElasticNet + HGB]
+    LAKE --> ML
+    FACTOR --> RANK[Factor + ML ensemble rank]
+    ML --> RANK
+    RANK --> PACKET[Immutable EvidencePacket]
+    PACKET --> ANALYSTS[Fundamental / valuation / estimates-peer / risk]
+    ANALYSTS --> DEBATE[Bull vs bear: opening + rebuttal]
+    DEBATE --> JUDGE[Consensus judge\n5-tier rating + capped adjustment]
+    JUDGE --> OPT[Deterministic long-only optimizer]
+    OPT --> REPORT[Backtest / report / portfolio UI]
+    OPT --> PREVIEW[Alpaca paper order preview]
+    PREVIEW --> APPROVAL[Explicit user approval]
+    APPROVAL --> PAPER[Paper endpoint only]
+```
+
+The deeper component and reproducibility notes are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+## Author's design philosophy
+
+This project is built around five convictions:
+
+1. **The LLM is a research committee, not a calculator or portfolio manager.**
+   Python owns ratios, timestamps, scores, risk constraints, weights and orders.
+2. **Institutional data matters only when its provenance survives the pipeline.**
+   Every observation keeps its stable company ID, ticker-at-date, availability
+   time, snapshot date, source hash and ingestion time.
+3. **Debate is useful only when it is falsifiable.** Bull, bear and judge outputs
+   must cite the immutable evidence packet; the narrative adjustment is capped.
+4. **A weak honest result is more valuable than a tuned demo.** SPY, equal-weight,
+   factor, ML and Agent ablations are frozen before evaluation, with transaction
+   costs and uncertainty reported even when the strategy underperforms.
+5. **The product should remain small enough to understand.** It is an academic
+   and self-use platform: operational simplicity is preferred, while the few
+   non-negotiable controls—look-ahead prevention, licensed-data boundaries and
+   paper-only execution—stay strict.
+
+## Data-source hierarchy
+
+Capital IQ is the analytical center of gravity, not one interchangeable feed
+among many:
+
+| Priority | Source | Permitted role |
+|---|---|---|
+| 1 — research authority | S&P Capital IQ Pro | company statements, filing availability, consensus estimates/revisions, valuation inputs, peers, ownership and evidence used by research Agents |
+| 2 — labelled factor support | Yahoo adjusted history / Alpaca IEX | realized-return labels, momentum, volatility, beta, execution calendar, transaction-cost simulation and paper-account synchronization |
+| 3 — reasoning layer | DeepSeek | evidence-grounded comparison, bull/bear debate and report synthesis; never a source of financial facts |
+
+External market APIs may help discover or test a factor, but they cannot replace
+Capital IQ company analysis or be presented as S&P data. Every table and report
+keeps the source distinction visible.
+
+## From S&P data to a stock portfolio
+
+The production workflow is deliberately sequential:
+
+1. Import point-in-time Capital IQ statements and estimate snapshots.
+2. Form the historical S&P 500 universe using ticker-at-date and stable IDs.
+3. Calculate value, quality, growth, revisions, momentum and low-risk factors;
+   inspect rank IC, monotonicity, stability and cross-factor correlation.
+   A company receives an investable composite only when at least four of six
+   families are present and at least two are institutional families (value,
+   quality, growth or revisions); price-only diagnostics cannot become picks.
+4. Train ElasticNet and histogram gradient boosting only on prior months, then
+   rank next-month excess return versus SPY.
+5. Send roughly ten high-value cases—new leaders, deteriorating holdings and
+   factor/ML disagreements—to the evidence-grounded Agent committee.
+6. Apply the judge's bounded score adjustment and optimize 20–30 long-only
+   holdings under stock, sector, volatility and turnover constraints.
+7. Review the report and paper-order preview; no order is submitted implicitly.
+
+The exact Capital IQ export cadence, filenames, import commands and readiness
+checks are in [`docs/OPERATING_RUNBOOK.md`](docs/OPERATING_RUNBOOK.md).
+
+## Safety and data boundary
+
+- Institutional observations, provenance, factor outputs, Agent records, portfolios and case-study results are stored in the isolated `institutional_quant` schema in Supabase. Use a direct or session-pooler connection string in `SUPABASE_DB_URL`; the driver disables prepared statements for pooler compatibility.
+- High-volume adjusted daily prices are a reproducible local cache at `IQ_PRICE_LAKE_PATH` (default `data/market/prices.parquet`). This prevents derived public-market data from consuming the Supabase free-tier database. Reads still use one storage interface, and select sources in the order Capital IQ, Yahoo, then Alpaca.
+- Original Capital IQ files remain in `data/raw` and are never sent to the LLM. Structured numeric evidence can leave the machine only after `CIQ_EXTERNAL_PROCESSING_CONFIRMED=true`.
+- Capital IQ values can enter Supabase only after `CIQ_CLOUD_STORAGE_CONFIRMED=true`. Confirm both permissions against the applicable NTU/S&P agreement first.
+- The broker adapter rejects every endpoint except `https://paper-api.alpaca.markets`. A five-minute preview plus explicit approval is required for each paper order.
+- DuckDB databases under `data/demo` are for tests and synthetic demonstrations only. DuckDB also queries the production Parquet price lake in-process; it is not the authoritative institutional database.
+
+## Quick start
+
+```bash
+cp .env.example .env
+# Fill SUPABASE_DB_URL and, when needed, DEEPSEEK_API_KEY / Alpaca paper keys.
+# Enable the two CIQ gates only after the licence checks described above.
+export UV_PROJECT_ENVIRONMENT=/Users/guohuiwen/.cache/sp500-institutional-quant-venv
+uv sync --extra dev
+uv run sp500iq preflight
+uv run sp500iq init-db
+uv run sp500iq sync-yahoo-prices --start 2017-04-01 --end 2026-08-31
+uv run sp500iq sync-alpaca-prices --start 2017-04-01 --end 2026-08-31
+uv run sp500iq serve
+```
+
+Open `http://127.0.0.1:8000`. The seven pages are Data Status, Factor Lab, Research Runs, Debate, Portfolio, Backtest and Paper Trading.
+
+After filling `.env`, `uv run sp500iq preflight --live` tests Supabase, DeepSeek and the read-only Alpaca paper account endpoint without printing secrets or submitting orders. Missing keys and licence gates are reported as `WAIT`, so setup can proceed incrementally.
+
+The production app keeps the retained TradingAgents provider stack optional. Install that dependency group before running the complete upstream regression suite:
+
+```bash
+uv sync --extra dev --extra tradingagents-upstream
+uv run pytest -q
+```
+
+After the base backtest and 24-month Agent study are available, `uv run sp500iq case-study` freezes 5/10/25 bps cost cases, debate/no-debate ablations when present, source hashes, code hash and model fingerprints under `output/manifests`.
+
+For a no-key, no-licensed-data engineering check:
+
+```bash
+uv run sp500iq synthetic-demo
+uv run sp500iq backtest-demo
+IQ_DATABASE_BACKEND=duckdb IQ_DATABASE_PATH=data/demo/institutional_quant.duckdb uv run sp500iq serve
+```
+
+This external volume creates macOS AppleDouble `._*` files inside virtual environments, so the commands above intentionally keep the venv on the internal disk. Project code and data remain on the external volume.
+
+Capital IQ export contracts are documented in [`docs/CIQ_EXPORT_TEMPLATES.md`](docs/CIQ_EXPORT_TEMPLATES.md). Import one file at a time with:
+
+```bash
+uv run sp500iq import-ciq fundamentals /absolute/path/fundamentals.xlsx
+```
+
+For a current S&P 500 instrument snapshot whose web export has no availability columns, supply the actual download timestamp explicitly. This exception is limited to `instruments` and does not qualify as historical index membership:
+
+```bash
+uv run sp500iq import-ciq instruments /absolute/path/current-sp500.xlsx \
+  --current-snapshot-as-of 2026-09-01 \
+  --current-snapshot-effective-at 2026-09-01T04:17:07+00:00
+```
+
+If the NTU entitlement cannot export historical membership, use the explicit
+mixed-source fallback for the fixed study window:
+
+```bash
+uv run sp500iq sync-public-sp500-membership \
+  --start 2021-09-01 --end 2026-08-31
+```
+
+This command archives and hashes a pinned [pitindex](https://github.com/arielNacamulli/pitindex)
+event dataset, applies source-linked S&P Global/SEC events after its build, and
+reconciles the end roster before writing any rows. The source manifest records
+`capital_iq_data=false`; certification and reports identify it as non-Capital-IQ.
+It is a practical public reconstruction, not a substitute for CRSP-level vendor
+authority. The command refuses dates after its verified coverage ceiling until
+the pinned source and official overrides are refreshed.
+
+The primary API is under `/api/v1`; interactive OpenAPI documentation is available at `/docs`. Historical certification fails on missing datasets, missing required availability timestamps, rejected rows, incomplete membership coverage or incomplete price coverage. Backtest returns always use the next available session open and include the requested one-way cost.
+
+## Upstream attribution
+
+This repository was adapted from [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents/tree/2448d0a12576f9b2ddcd5980a0630833423d1e1b), pinned at commit `2448d0a12576f9b2ddcd5980a0630833423d1e1b`, under Apache-2.0. The upstream source, history, licence and the original README below are retained. New institutional-quant code lives in `institutional_quant/`.
+
+---
+
 <p align="center">
   <img src="assets/TauricResearch.png" style="width: 60%; height: auto;">
 </p>
