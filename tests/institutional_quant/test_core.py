@@ -414,6 +414,124 @@ def test_ciq_spg_formula_metadata_is_parsed() -> None:
     }
 
 
+def test_ciq_multi_as_of_estimate_columns_keep_their_own_dates(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "historical_estimates.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["=SPGTable(1)", None, None, None, None, None, None])
+    sheet.append(
+        [
+            '=SPGLabel(1,267969,"")',
+            '=SPGLabel(1,267961,"")',
+            '=SPGLabel(1,267963,"")',
+            '=SPGLabel(1,290476,"FY+1","08/31/2021")',
+            '=SPGLabel(1,290486,"FY+1","08/31/2021")',
+            '=SPGLabel(1,290476,"FY+1","09/30/2021")',
+            '=SPGLabel(1,290486,"FY+1","09/30/2021")',
+        ]
+    )
+    sheet.append([None] * 7)
+    sheet.append([None] * 7)
+    sheet.append(
+        [
+            "SP_ENTITY_NAME",
+            "SP_ENTITY_ID",
+            "SP_EXCHANGE_TICKER",
+            "SP_EPS_NORM_EST",
+            "SP_EPS_NORM_DATE_EST",
+            "SP_EPS_NORM_EST",
+            "SP_EPS_NORM_DATE_EST",
+        ]
+    )
+    sheet.append([None, None, None, "FY+1", "FY+1", "FY+1", "FY+1"])
+    sheet.append(
+        [
+            "Example Company",
+            123456,
+            "NYSE:EXM",
+            5.25,
+            "2022-12-31",
+            5.75,
+            "2022-12-31",
+        ]
+    )
+    workbook.save(source)
+
+    store = DuckDBStore(tmp_path / "historical-estimates.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.ESTIMATES)
+
+    assert result.imported_rows == 2
+    imported = store.query_df(
+        "SELECT ticker, fiscal_period, effective_at, as_of_date, metric, value "
+        "FROM estimates ORDER BY as_of_date"
+    )
+    assert imported["ticker"].tolist() == ["EXM", "EXM"]
+    assert imported["fiscal_period"].tolist() == [
+        pd.Timestamp("2022-12-31"),
+        pd.Timestamp("2022-12-31"),
+    ]
+    assert imported["as_of_date"].tolist() == [
+        pd.Timestamp("2021-08-31"),
+        pd.Timestamp("2021-09-30"),
+    ]
+    assert imported["effective_at"].tolist() == [
+        pd.Timestamp("2021-08-31 23:59:59.999999"),
+        pd.Timestamp("2021-09-30 23:59:59.999999"),
+    ]
+    assert imported["metric"].tolist() == ["eps_estimate", "eps_estimate"]
+    assert imported["value"].tolist() == pytest.approx([5.25, 5.75])
+
+
+def test_ciq_current_column_is_not_relabelled_as_a_historical_snapshot(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "current_and_historical_estimates.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["=SPGTable(1)", None, None, None, None, None])
+    sheet.append(
+        [
+            '=SPGLabel(1,267961,"")',
+            '=SPGLabel(1,331277,"")',
+            '=SPGLabel(1,290476,"FY+1","Current")',
+            '=SPGLabel(1,290476,"FY+1","08/31/2021")',
+            '=SPGLabel(1,290486,"FY+1","08/31/2021")',
+            None,
+        ]
+    )
+    sheet.append([None] * 6)
+    sheet.append([None] * 6)
+    sheet.append(
+        [
+            "SP_ENTITY_ID",
+            "SP_EXCHANGE_TICKER",
+            "SP_EPS_NORM_EST",
+            "SP_EPS_NORM_EST",
+            "SP_EPS_NORM_DATE_EST",
+            None,
+        ]
+    )
+    sheet.append([None, None, "FY+1", "FY+1", "FY+1", None])
+    sheet.append([123456, "NYSE:EXM", 9.0, 5.25, "2022-12-31", None])
+    workbook.save(source)
+
+    store = DuckDBStore(tmp_path / "current-and-historical.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.ESTIMATES)
+
+    assert result.imported_rows == 1
+    imported = store.query_df("SELECT as_of_date, value FROM estimates").iloc[0]
+    assert imported["as_of_date"] == pd.Timestamp("2021-08-31")
+    assert imported["value"] == pytest.approx(5.25)
+
+
 def test_mixed_ciq_period_codes_are_applied_per_metric() -> None:
     frame = pd.DataFrame(
         [

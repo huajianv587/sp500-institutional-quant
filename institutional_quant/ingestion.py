@@ -381,7 +381,7 @@ class CapitalIQImporter:
             preview = pd.read_excel(path, header=None, nrows=25)
             header_row = CapitalIQImporter._detect_header_row(preview)
             frame = pd.read_excel(path, header=header_row)
-            metadata = CapitalIQImporter._excel_formula_metadata(path)
+            metadata = CapitalIQImporter._excel_formula_metadata(path, frame.columns)
             return frame.dropna(how="all").reset_index(drop=True), metadata
         raise ValueError("Capital IQ import supports CSV, XLSX, XLSM, and XLS")
 
@@ -420,7 +420,9 @@ class CapitalIQImporter:
         return metadata
 
     @staticmethod
-    def _excel_formula_metadata(path: Path) -> dict[str, object]:
+    def _excel_formula_metadata(
+        path: Path, actual_columns: Iterable[object] | None = None
+    ) -> dict[str, object]:
         if path.suffix.lower() == ".xls":
             return {}
         from openpyxl import load_workbook
@@ -435,6 +437,8 @@ class CapitalIQImporter:
                 if isinstance(value, str) and value.startswith("=")
             ]
             metadata = CapitalIQImporter._parse_spg_formula_metadata(formulas)
+            preview = pd.read_excel(path, header=None, nrows=25)
+            header_row = CapitalIQImporter._detect_header_row(preview)
             table_row = next(
                 (
                     row_number
@@ -447,25 +451,70 @@ class CapitalIQImporter:
                 ),
                 None,
             )
-            if table_row is not None and table_row + 1 <= sheet.max_row:
-                preview = pd.read_excel(path, header=None, nrows=25)
-                header_row = CapitalIQImporter._detect_header_row(preview)
+            label_row = table_row + 1 if table_row is not None else None
+            if label_row is None:
+                candidate_rows = range(1, min(header_row + 1, sheet.max_row) + 1)
+                label_counts = {
+                    row_number: sum(
+                        isinstance(sheet.cell(row_number, column).value, str)
+                        and "SPGLabel" in sheet.cell(row_number, column).value
+                        for column in range(1, sheet.max_column + 1)
+                    )
+                    for row_number in candidate_rows
+                }
+                if label_counts and max(label_counts.values()) > 0:
+                    label_row = max(label_counts, key=label_counts.get)
+            if label_row is not None and label_row <= sheet.max_row:
                 by_header: dict[str, set[str]] = {}
+                embedded_columns: list[dict[str, str]] = []
+                parsed_columns = list(actual_columns) if actual_columns is not None else []
                 for column in range(1, min(sheet.max_column, preview.shape[1]) + 1):
                     header = preview.iloc[header_row, column - 1]
-                    formula = sheet.cell(table_row + 1, column).value
+                    formula = sheet.cell(label_row, column).value
                     if pd.isna(header) or not isinstance(formula, str) or "SPGLabel" not in formula:
                         continue
-                    match = re.search(
-                        r'SPGLabel\([^,]+,\s*[^,]+,\s*"([A-Za-z]+(?:[+-]?\d+)?)"',
-                        formula,
+                    match = re.search(r"SPGLabel\(\s*[^,]+,\s*([^,]+)", formula)
+                    quoted = re.findall(r'"([^"]*)"', formula)
+                    period_code = quoted[0].upper() if quoted else ""
+                    as_of_token = next(
+                        (
+                            token
+                            for token in quoted[1:]
+                            if token.lower() == "current"
+                            or re.fullmatch(r"(?:<>|<=|>=)?\d{1,2}/\d{1,2}/\d{4}", token)
+                        ),
+                        None,
                     )
+                    entry = {
+                        "column": (
+                            str(parsed_columns[column - 1])
+                            if column - 1 < len(parsed_columns)
+                            else str(header)
+                        ),
+                        "source_header": str(header),
+                        "header_key": _column_key(header),
+                    }
                     if match:
-                        by_header.setdefault(_column_key(header), set()).add(match.group(1).upper())
+                        entry["keyfield"] = match.group(1).strip()
+                    if period_code:
+                        entry["period_code"] = period_code
+                        by_header.setdefault(_column_key(header), set()).add(period_code)
+                    if as_of_token:
+                        date_match = re.fullmatch(
+                            r"(?:<>|<=|>=)?(\d{1,2})/(\d{1,2})/(\d{4})", as_of_token
+                        )
+                        if date_match:
+                            month, day, year = (int(value) for value in date_match.groups())
+                            entry["as_of_date"] = date(year, month, day).isoformat()
+                        else:
+                            entry["as_of"] = "current"
+                    embedded_columns.append(entry)
                 if by_header:
                     metadata["embedded_period_codes_by_header"] = {
                         header: sorted(codes) for header, codes in sorted(by_header.items())
                     }
+                if embedded_columns:
+                    metadata["embedded_columns"] = embedded_columns
             return metadata
         finally:
             workbook.close()
@@ -597,6 +646,104 @@ class CapitalIQImporter:
         period_end = pd.to_datetime(derived["period_end"], errors="coerce")
         derived["fiscal_period"] = period_end + pd.DateOffset(months=months)
         return derived, period_code
+
+    @staticmethod
+    def _expand_historical_estimate_snapshots(
+        frame: pd.DataFrame, source_metadata: dict[str, object]
+    ) -> pd.DataFrame:
+        """Convert repeated CIQ as-of columns into dated estimate observations."""
+        raw_columns = source_metadata.get("embedded_columns")
+        if not isinstance(raw_columns, list):
+            return frame
+        dated = [
+            item
+            for item in raw_columns
+            if isinstance(item, dict)
+            and isinstance(item.get("column"), str)
+            and isinstance(item.get("as_of_date"), str)
+            and item["column"] in frame.columns
+        ]
+        dated_header_keys = {str(item.get("header_key")) for item in dated}
+        has_current_sibling = any(
+            isinstance(item, dict)
+            and item.get("as_of") == "current"
+            and str(item.get("header_key")) in dated_header_keys
+            for item in raw_columns
+        )
+        if len({str(item["as_of_date"]) for item in dated}) < 2 and not has_current_sibling:
+            return frame
+
+        fiscal_period_aliases = set(ALIASES["fiscal_period"]) | set(ALIASES["period_end"])
+        period_columns = [
+            item for item in dated if str(item.get("header_key")) in fiscal_period_aliases
+        ]
+        identity_canonicals = {
+            "company_id",
+            "ticker",
+            "company_name",
+            "sector",
+            "currency",
+            "unit",
+            "valid_to",
+        }
+        identity_aliases = {
+            alias
+            for canonical in identity_canonicals
+            for alias in ALIASES.get(canonical, ())
+        }
+        identity_columns = [
+            str(column) for column in frame.columns if _column_key(column) in identity_aliases
+        ]
+        observation_rows = (
+            frame[identity_columns].notna().any(axis=1)
+            if identity_columns
+            else pd.Series(True, index=frame.index)
+        )
+        source_rows = frame.loc[observation_rows]
+        value_columns = [
+            item
+            for item in dated
+            if item not in period_columns
+            and str(item.get("header_key")) not in identity_aliases
+        ]
+        if not value_columns:
+            return frame
+
+        observations: list[pd.DataFrame] = []
+        for item in value_columns:
+            as_of_date = str(item["as_of_date"])
+            period_code = str(item.get("period_code", ""))
+            companion = next(
+                (
+                    candidate
+                    for candidate in period_columns
+                    if candidate.get("as_of_date") == as_of_date
+                    and (
+                        not period_code
+                        or not candidate.get("period_code")
+                        or candidate.get("period_code") == period_code
+                    )
+                ),
+                None,
+            )
+            selected = source_rows[identity_columns].copy()
+            selected["as_of_date"] = as_of_date
+            selected["effective_at"] = as_of_date
+            selected["fiscal_period"] = (
+                source_rows[str(companion["column"])] if companion is not None else None
+            )
+            selected["metric"] = str(item.get("source_header", item["column"]))
+            selected["value"] = source_rows[str(item["column"])]
+            observations.append(selected)
+
+        source_metadata["historical_snapshot_dates"] = sorted(
+            {str(item["as_of_date"]) for item in value_columns}
+        )
+        source_metadata["estimate_availability_source"] = "embedded_spg_as_of_date_by_column"
+        source_metadata["estimate_fiscal_period_policy"] = (
+            "pair_same_as_of_and_period_code_companion"
+        )
+        return pd.concat(observations, ignore_index=True)
 
     @staticmethod
     def _wide_to_long(frame: pd.DataFrame, dataset: DatasetKind) -> pd.DataFrame:
@@ -735,6 +882,12 @@ class CapitalIQImporter:
         if date_only_availability:
             source_metadata["effective_at_granularity"] = "date"
             source_metadata["date_only_availability_policy"] = "end_of_day"
+        if dataset is DatasetKind.ESTIMATES:
+            frame = self._expand_historical_estimate_snapshots(frame, source_metadata)
+            if source_metadata.get("historical_snapshot_dates"):
+                date_only_availability = True
+                source_metadata["effective_at_granularity"] = "date"
+                source_metadata["date_only_availability_policy"] = "end_of_day"
         frame = self._rename_columns(frame)
         frame = self._normalize_identifiers(frame)
         frame, parameter_rows_dropped = self._drop_parameter_rows(frame)
