@@ -5,14 +5,31 @@ An English-language, local-first research system that extends TradingAgents with
 ## Project status
 
 The application, database schema, deterministic engines, Agent graph, API, UI and
-paper-trading safety boundary are implemented. The repository is still in the
-**data-completion phase**, not the final investment-result phase: a current
-Capital IQ snapshot cannot certify a five-year point-in-time study. The final
-case study and GitHub release remain gated on historical fundamentals, monthly
-estimate snapshots, the model benchmark and the 24-month debate ablation. The
-2017–2026 adjusted-price warm-up and study window is now populated and quality
-checked, but it remains an explicitly labelled Yahoo/Alpaca substitute until a
-licensed Capital IQ price export is available.
+paper-trading safety boundary are implemented. A **current Capital IQ research
+loop is now verified end to end**: 500 S&P 500 companies, 21 fundamental/valuation
+metrics and seven FY+1 estimate/revision metrics produce all six factor families;
+the revisions family currently covers 489 companies. These are data-engineering
+and factor-coverage results, not buy recommendations or performance claims.
+
+The live external-service smoke loop also passes. One 2026-09-01 company packet
+contained 30 attributable observations and completed all nine
+`deepseek-v4-pro` nodes (four independent analysts, two bull/bear rounds and the
+judge); all 25 references selected by the judge resolved to the immutable packet.
+The matching no-debate route completed by reusing the analyst cache, and the two
+routes produced different rating directions, confirming that debate is an active
+ablation rather than decorative orchestration. Alpaca created one five-minute
+paper-order preview against the fixed paper endpoint and submitted zero orders.
+DeepSeek returned the model alias/version but no `system_fingerprint`, so that
+field is deliberately stored as null instead of being fabricated. This is a
+connectivity and control result, not a model benchmark or investment result.
+
+The repository remains in the **historical data-completion phase**, not the final
+investment-result phase. A current Capital IQ snapshot cannot certify a five-year
+point-in-time study. The final case study and GitHub release remain gated on
+historical fundamentals, monthly estimate snapshots, the model benchmark and the
+24-month debate ablation. The 2017–2026 adjusted-price warm-up and study window is
+populated and quality checked, but remains an explicitly labelled Yahoo/Alpaca
+substitute until a licensed Capital IQ price export is available.
 
 ## Architecture
 
@@ -100,6 +117,37 @@ The production workflow is deliberately sequential:
 The exact Capital IQ export cadence, filenames, import commands and readiness
 checks are in [`docs/OPERATING_RUNBOOK.md`](docs/OPERATING_RUNBOOK.md).
 
+## How the platform is used in practice
+
+Capital IQ Pro is the primary research terminal; this repository is the
+reproducible analysis and decision layer around it:
+
+1. In Capital IQ, open a saved S&P 500 screen and select the research fields for
+   the question being studied. The verified live templates are
+   `TRAINING_V3_SP500_INSTITUTIONAL_FACTORS_CURRENT` and
+   `TRAINING_V3_SP500_ESTIMATES_REVISIONS_CURRENT`.
+2. Export **Results As Table Function**. The workbook keeps Capital IQ keyfield,
+   FY/LTM/current and period-end parameters, which the importer records as source
+   metadata instead of flattening away.
+3. Upload/import the workbook locally. The platform archives the original by
+   SHA-256, validates stable IDs and timestamps, rejects malformed observations,
+   normalizes units and writes licensed observations to Supabase.
+4. Run the current-snapshot audit and Factor Lab. Python calculates valuation,
+   quality, growth, estimate-revision breadth, momentum and risk; candidate lists
+   remain diagnostics until portfolio constraints and research review pass.
+5. For selected companies, build an `EvidencePacket` from the licensed numbers
+   and source references. Only when the licence gate permits external processing
+   does DeepSeek receive that structured packet for analyst views, bull/bear
+   debate and a bounded consensus adjustment. Strict structured outputs require
+   exact Evidence IDs; malformed or uncited responses get one repair attempt and
+   then fail the company case.
+6. The deterministic optimizer creates a 20–30 stock proposal. The user reviews
+   evidence, dissent, exposures and turnover before any Alpaca paper preview.
+
+Other APIs are important but subordinate: they supply return labels, market-risk
+features, validation and simulated execution. They never silently replace a
+Capital IQ fundamental or estimate in a company research report.
+
 ## Safety and data boundary
 
 - Institutional observations, provenance, factor outputs, Agent records, portfolios and case-study results are stored in the isolated `institutional_quant` schema in Supabase. Use a direct or session-pooler connection string in `SUPABASE_DB_URL`; the driver disables prepared statements for pooler compatibility.
@@ -153,12 +201,27 @@ Capital IQ export contracts are documented in [`docs/CIQ_EXPORT_TEMPLATES.md`](d
 uv run sp500iq import-ciq fundamentals /absolute/path/fundamentals.xlsx
 ```
 
-For a current S&P 500 instrument snapshot whose web export has no availability columns, supply the actual download timestamp explicitly. This exception is limited to `instruments` and does not qualify as historical index membership:
+For a live-only Capital IQ snapshot, supply the actual download timestamp
+explicitly. This is accepted for instruments, fundamentals and estimates, but it
+does not turn the file into historical point-in-time evidence. Fundamentals must
+still include Capital IQ Financial Filing Date, and estimates must include the
+company-specific target fiscal period:
 
 ```bash
 uv run sp500iq import-ciq instruments /absolute/path/current-sp500.xlsx \
   --current-snapshot-as-of 2026-09-01 \
   --current-snapshot-effective-at 2026-09-01T04:17:07+00:00
+
+uv run sp500iq import-ciq fundamentals /absolute/path/current-factors.xlsx \
+  --current-snapshot-as-of 2026-09-01 \
+  --current-snapshot-effective-at 2026-09-01T09:10:19+00:00
+
+uv run sp500iq import-ciq estimates /absolute/path/current-estimates.xlsx \
+  --current-snapshot-as-of 2026-09-01 \
+  --current-snapshot-effective-at 2026-09-01T10:01:36+00:00
+
+uv run python scripts/audit_current_snapshot.py --as-of 2026-09-01
+uv run sp500iq factor-snapshot --as-of 2026-09-01 --top 25
 ```
 
 If the NTU entitlement cannot export historical membership, use the explicit

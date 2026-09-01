@@ -5,6 +5,7 @@ import hashlib
 import json
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time
 from typing import Any, TypedDict, TypeVar
@@ -13,7 +14,7 @@ import httpx
 import numpy as np
 import pandas as pd
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from .config import Settings
 from .factors import FactorEngine
@@ -31,11 +32,40 @@ PROMPT_VERSION = "institutional-research-v1"
 T = TypeVar("T", bound=BaseModel)
 
 
+def _strict_json_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make Pydantic JSON Schema compatible with DeepSeek strict outputs.
+
+    DeepSeek requires every property of every object to appear in ``required``
+    when ``strict`` is enabled. Pydantic intentionally omits fields with
+    defaults, so normalize the generated schema recursively before sending it.
+    Optional fields remain nullable through their existing ``anyOf`` clauses.
+    """
+
+    def normalize(node: Any) -> None:
+        if isinstance(node, dict):
+            properties = node.get("properties")
+            if isinstance(properties, dict):
+                node["required"] = list(properties)
+                node["additionalProperties"] = False
+            for value in node.values():
+                normalize(value)
+        elif isinstance(node, list):
+            for value in node:
+                normalize(value)
+
+    normalized = json.loads(json.dumps(schema))
+    normalize(normalized)
+    return normalized
+
+
 class ConsensusDraft(BaseModel):
     rating: Rating
     score_adjustment: float
     summary: str
-    supporting_evidence: list[str]
+    supporting_evidence: list[str] = Field(
+        min_length=1,
+        description="Exact EvidencePacket evidence_id values only; never prose or inline citations.",
+    )
     dissent: str
     uncertainties: list[str]
     analyst_median_score: float
@@ -75,8 +105,10 @@ class DeepSeekResponsesClient:
             return str(payload["output_text"])
         pieces: list[str] = []
         for item in payload.get("output", []):
+            if item.get("type") != "message" or item.get("role") != "assistant":
+                continue
             for content in item.get("content", []):
-                if content.get("text"):
+                if content.get("type") == "output_text" and content.get("text"):
                     pieces.append(str(content["text"]))
         if pieces:
             return "".join(pieces)
@@ -94,8 +126,9 @@ class DeepSeekResponsesClient:
         output_type: type[T],
         model: str,
         reasoning_effort: str,
+        validator: Callable[[T], None] | None = None,
     ) -> StructuredResponse:
-        schema = output_type.model_json_schema()
+        schema = _strict_json_schema(output_type.model_json_schema())
         request = {
             "model": model,
             "reasoning": {"effort": reasoning_effort},
@@ -130,6 +163,8 @@ class DeepSeekResponsesClient:
                 latency = (time.perf_counter() - started) * 1000
                 try:
                     parsed = output_type.model_validate_json(self._output_text(payload))
+                    if validator is not None:
+                        validator(parsed)
                     usage = payload.get("usage", {})
                     return StructuredResponse(
                         value=parsed,
@@ -177,16 +212,18 @@ class EvidencePacketBuilder:
             WITH observations AS (
                 SELECT company_id, metric AS field, value, unit, effective_at, source_file_id,
                        ROW_NUMBER() OVER (PARTITION BY company_id, metric ORDER BY period_end DESC, effective_at DESC) AS rn
-                FROM fundamentals WHERE company_id = ? AND effective_at <= ?
+                FROM fundamentals
+                WHERE company_id = ? AND effective_at <= ? AND as_of_date <= ?
                 UNION ALL
                 SELECT company_id, metric AS field, value, unit, effective_at, source_file_id,
                        ROW_NUMBER() OVER (PARTITION BY company_id, metric ORDER BY fiscal_period DESC, effective_at DESC) AS rn
-                FROM estimates WHERE company_id = ? AND effective_at <= ?
+                FROM estimates
+                WHERE company_id = ? AND effective_at <= ? AND as_of_date <= ?
             )
             SELECT field, value, unit, effective_at, source_file_id
             FROM observations WHERE rn = 1 ORDER BY field
             """,
-            [company_id, cutoff, company_id, cutoff],
+            [company_id, cutoff, as_of_date, company_id, cutoff, as_of_date],
         )
         items = [
             EvidenceItem(
@@ -333,8 +370,8 @@ class ResearchGraph:
             output_type=output_type,
             model=model,
             reasoning_effort=reasoning,
+            validator=lambda value: self._validate_references(value, packet),
         )
-        self._validate_references(response.value, packet)
         self.store.cache_put(
             {
                 "cache_key": cache_key,
@@ -429,7 +466,8 @@ class ResearchGraph:
             role=consensus_role,
             prompt=(
                 f"{common} Act as an independent consensus judge. Debate rhetoric cannot outweigh evidence. "
-                "The score_adjustment is bounded to plus or minus 0.10. Preserve dissent and uncertainties."
+                "The score_adjustment is bounded to plus or minus 0.10. Preserve dissent and uncertainties. "
+                "supporting_evidence must contain exact EvidencePacket evidence_id strings only, with no prose."
             ),
             payload={
                 "packet": base,

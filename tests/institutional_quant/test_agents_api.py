@@ -3,11 +3,19 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import httpx
+import pandas as pd
 from fastapi.testclient import TestClient
 
-from institutional_quant.agents import ResearchGraph, StructuredResponse
+from institutional_quant.agents import (
+    DeepSeekResponsesClient,
+    EvidencePacketBuilder,
+    ResearchGraph,
+    StructuredResponse,
+    _strict_json_schema,
+)
 from institutional_quant.alpaca import AlpacaPaperClient
 from institutional_quant.api import create_app
 from institutional_quant.config import Settings
@@ -86,6 +94,144 @@ def packet() -> EvidencePacket:
             )
         ],
     )
+
+
+def test_deepseek_strict_schema_requires_all_nested_properties() -> None:
+    schema = _strict_json_schema(AnalystView.model_json_schema())
+
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+    claim = schema["$defs"]["EvidenceClaim"]
+    assert set(claim["required"]) == set(claim["properties"])
+    assert claim["additionalProperties"] is False
+
+
+def test_responses_client_ignores_reasoning_text() -> None:
+    payload = {
+        "output": [
+            {
+                "type": "reasoning",
+                "content": [{"type": "reasoning_text", "text": "hidden work"}],
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": '{"ok":true}'}],
+            },
+        ]
+    }
+
+    assert DeepSeekResponsesClient._output_text(payload) == '{"ok":true}'
+
+
+def test_responses_client_retries_semantic_validation_once() -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        summary = "invalid" if calls == 1 else "valid"
+        body = {
+            "role": "fundamental",
+            "stance_score": 0.0,
+            "summary": summary,
+            "claims": [{"text": "Grounded claim", "evidence_refs": ["src:revenue"]}],
+            "catalysts": [],
+            "risks": [],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "model": "fake-v1",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": json.dumps(body)}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+        )
+
+    client = DeepSeekResponsesClient(
+        Settings(database_backend="duckdb", deepseek_api_key="test"),
+        transport=httpx.MockTransport(handler),
+    )
+
+    def validator(value: AnalystView) -> None:
+        if value.summary != "valid":
+            raise ValueError("semantic validation failed")
+
+    result = asyncio.run(
+        client.structured(
+            role="fundamental",
+            system_prompt="test",
+            user_payload={},
+            output_type=AnalystView,
+            model="fake",
+            reasoning_effort="high",
+            validator=validator,
+        )
+    )
+
+    assert result.value.summary == "valid"
+    assert calls == 2
+
+
+def test_evidence_packet_excludes_future_snapshot_date(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "evidence.duckdb")
+    store.initialize()
+    store.insert_frame(
+        "fundamentals",
+        pd.DataFrame(
+            [
+                {
+                    "company_id": "C1",
+                    "ticker": "ONE",
+                    "period_end": date(2026, 6, 30),
+                    "period_type": "Quarterly",
+                    "effective_at": datetime(2026, 8, 1),
+                    "as_of_date": date(2026, 8, 31),
+                    "metric": "revenue",
+                    "value": 100.0,
+                    "unit": "USD",
+                    "source_file_id": "visible",
+                    "ingested_at": datetime(2026, 9, 1),
+                },
+                {
+                    "company_id": "C1",
+                    "ticker": "ONE",
+                    "period_end": date(2026, 6, 30),
+                    "period_type": "Quarterly",
+                    "effective_at": datetime(2026, 8, 1),
+                    "as_of_date": date(2026, 9, 2),
+                    "metric": "future_metric",
+                    "value": 999.0,
+                    "unit": "USD",
+                    "source_file_id": "future",
+                    "ingested_at": datetime(2026, 9, 2),
+                },
+            ]
+        ),
+    )
+    builder = EvidencePacketBuilder(store)
+    builder.factors = SimpleNamespace(
+        snapshot=lambda _as_of: pd.DataFrame(
+            [
+                {
+                    "company_id": "C1",
+                    "ticker": "ONE",
+                    "sector": "Industrials",
+                    "factor_score": 0.2,
+                }
+            ]
+        )
+    )
+
+    result = builder.build("C1", date(2026, 9, 1))
+
+    assert [item.field for item in result.evidence] == ["revenue"]
 
 
 def test_langgraph_debate_and_cache(tmp_path) -> None:

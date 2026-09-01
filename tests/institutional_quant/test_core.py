@@ -52,6 +52,30 @@ def test_deterministic_financial_ratios() -> None:
     assert result.margin_change == pytest.approx(0.02)
 
 
+def test_exported_valuation_multiples_are_deterministic_fallbacks() -> None:
+    frame = pd.DataFrame([{"price_to_earnings": 20.0, "tev_ebitda": 10.0}])
+
+    result = derive_fundamental_features(frame).iloc[0]
+
+    assert result.earnings_yield == pytest.approx(0.05)
+    assert result.ebitda_to_ev == pytest.approx(0.10)
+
+
+def test_ciq_thousands_to_millions_scale_is_calibrated_from_reported_multiples() -> None:
+    frame = pd.DataFrame(
+        {
+            "net_income": [10_000.0, 20_000.0, 30_000.0, -5_000.0],
+            "market_cap": [100.0, 200.0, 300.0, 50.0],
+            "price_to_earnings": [10.0, 10.0, 10.0, np.nan],
+        }
+    )
+
+    result = derive_fundamental_features(frame)
+
+    assert result.loc[:2, "earnings_yield"].tolist() == pytest.approx([0.1, 0.1, 0.1])
+    assert result.loc[3, "earnings_yield"] == pytest.approx(-0.1)
+
+
 def test_symbol_and_sector_are_point_in_time(tmp_path) -> None:
     store = DuckDBStore(tmp_path / "test.duckdb")
     store.initialize()
@@ -135,6 +159,38 @@ def test_symbol_and_sector_are_point_in_time(tmp_path) -> None:
     new = FactorEngine(store)._universe(date(2024, 6, 1)).iloc[0]
     assert (old.ticker, old.sector) == ("OLD", "Energy")
     assert (new.ticker, new.sector) == ("NEW", "Technology")
+
+
+def test_current_snapshot_metrics_are_not_visible_before_their_as_of_date(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "metric-asof.duckdb")
+    store.initialize()
+    store.insert_frame(
+        "fundamentals",
+        pd.DataFrame(
+            [
+                {
+                    "company_id": "C1",
+                    "ticker": "ONE",
+                    "period_end": date(2025, 12, 31),
+                    "period_type": "FY",
+                    "effective_at": datetime(2026, 2, 1, 23, 59),
+                    "as_of_date": date(2026, 9, 1),
+                    "metric": "revenue",
+                    "value": 100.0,
+                    "unit": None,
+                    "source_file_id": "current-snapshot",
+                    "ingested_at": datetime(2026, 9, 1, 9, 10),
+                }
+            ]
+        ),
+    )
+    engine = FactorEngine(store)
+
+    before, _ = engine._latest_metrics("fundamentals", date(2026, 8, 31))
+    on_date, _ = engine._latest_metrics("fundamentals", date(2026, 9, 1))
+
+    assert before.empty
+    assert on_date.iloc[0]["revenue"] == pytest.approx(100.0)
 
 
 def test_factor_score_requires_institutional_and_total_family_coverage() -> None:
@@ -342,18 +398,59 @@ def test_ciq_spg_formula_metadata_is_parsed() -> None:
         [
             '=SPGLabel(266637,329288,"FY0","08/31/2026","Options:Curr=USD")',
             '=SPGLabel(266637,325375,"FY+1","08/31/2026","Options:Curr=USD")',
+            '=SPGLabel(266637,371494,"LTM","08/31/2026","Options:Curr=USD")',
             '=SPGLabel(266637,329318,"","<>08/31/2026","Options:Curr=USD")',
         ]
     )
 
     assert metadata == {
         "embedded_as_of_date": "2026-08-31",
-        "embedded_period_codes": ["FY+1", "FY0"],
+        "embedded_period_codes": ["FY+1", "FY0", "LTM"],
         "embedded_period_codes_by_keyfield": {
             "325375": ["FY+1"],
             "329288": ["FY0"],
+            "371494": ["LTM"],
         },
     }
+
+
+def test_mixed_ciq_period_codes_are_applied_per_metric() -> None:
+    frame = pd.DataFrame(
+        [
+            {
+                "metric": "IQ_TOTAL_REV",
+                "period_end": "2025-12-31",
+                "effective_at": "2026-02-01",
+            },
+            {
+                "metric": "IQ_PE",
+                "period_end": "2025-12-31",
+                "effective_at": "2026-02-01",
+            },
+            {
+                "metric": "SP_MARKETCAP",
+                "period_end": "2025-12-31",
+                "effective_at": "2026-02-01",
+            },
+        ]
+    )
+    metadata = {
+        "embedded_period_codes_by_header": {
+            "iq_total_rev": ["FY0"],
+            "iq_pe": ["LTM"],
+        }
+    }
+
+    derived = CapitalIQImporter._derive_fundamental_period_types(
+        frame,
+        metadata,
+        current_snapshot_as_of=date(2026, 9, 1),
+        current_snapshot_effective_at=datetime(2026, 9, 1, 4, 30),
+    )
+
+    assert derived["period_type"].tolist() == ["FY", "LTM", "CURRENT"]
+    assert derived.iloc[2]["period_end"] == date(2026, 9, 1)
+    assert derived.iloc[2]["effective_at"] == datetime(2026, 9, 1, 4, 30)
 
 
 def test_ciq_parameter_row_is_not_treated_as_an_observation() -> None:
@@ -431,6 +528,85 @@ def test_ciq_estimate_export_derives_target_period_and_conservative_availability
     assert imported["value"] == pytest.approx(5.5)
 
 
+def test_ciq_current_estimate_export_maps_revision_counts_and_target_period(
+    tmp_path,
+) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "current_estimates.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append([None] * 8)
+    sheet.append([None] * 8)
+    sheet.append([None] * 8)
+    sheet.append(
+        [
+            '=SPGLabel(1,267969,"")',
+            '=SPGLabel(1,267961,"")',
+            '=SPGLabel(1,331277,"")',
+            '=SPGLabel(1,290476,"FY+1","Current")',
+            '=SPGLabel(1,330485,"FY+1")',
+            '=SPGLabel(1,330486,"FY+1")',
+            '=SPGLabel(1,330491,"FY+1")',
+            '=SPGLabel(1,290486,"FY+1","Current")',
+        ]
+    )
+    sheet.append(
+        [
+            "SP_ENTITY_NAME",
+            "SP_ENTITY_ID",
+            "SP_EXCHANGE_TICKER",
+            "SP_EPS_NORM_EST",
+            "SP_EPS_NORM_EST_NUM_ANALYSTS_MONTH",
+            "SP_EPS_NORM_EST_UP_MONTH",
+            "SP_EPS_NORM_EST_DOWN_MONTH",
+            "SP_EPS_NORM_DATE_EST",
+        ]
+    )
+    sheet.append([None, None, None, "FY+1", "FY+1", "FY+1", "FY+1", "FY+1"])
+    sheet.append(["Example Company", 123456, "NYSE:EXM", 5.5, 12, 4, 2, "2027-12-31"])
+    workbook.save(source)
+
+    store = DuckDBStore(tmp_path / "current_estimates.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+    result = CapitalIQImporter(store, settings).import_file(
+        source,
+        DatasetKind.ESTIMATES,
+        current_snapshot_as_of=date(2026, 9, 1),
+        current_snapshot_effective_at=datetime(2026, 9, 1, 10, 1),
+    )
+
+    assert result.imported_rows == 4
+    imported = store.query_df("SELECT fiscal_period, metric, value FROM estimates ORDER BY metric")
+    assert set(imported["metric"]) == {
+        "eps_analyst_count_1m",
+        "eps_estimate",
+        "eps_down_revisions_1m",
+        "eps_up_revisions_1m",
+    }
+    assert set(imported["fiscal_period"]) == {pd.Timestamp("2027-12-31")}
+
+
+def test_revision_breadth_uses_analyst_coverage_and_is_bounded() -> None:
+    from institutional_quant.calculations import derive_estimate_revision_features
+
+    frame = pd.DataFrame(
+        {
+            "eps_analyst_count_1m": [10, 2, None],
+            "eps_up_revisions_1m": [6, 5, 1],
+            "eps_down_revisions_1m": [2, 0, 3],
+            "eps_up_revisions_3m": [8, 0, 1],
+            "eps_down_revisions_3m": [1, 5, 3],
+        }
+    )
+
+    derived = derive_estimate_revision_features(frame)
+
+    assert derived["eps_revision_1m"].tolist() == pytest.approx([0.4, 1.0, -0.5])
+    assert derived["eps_revision_3m"].tolist() == pytest.approx([0.7, -1.0, -0.5])
+
+
 def test_ciq_keyfield_headers_are_normalized() -> None:
     frame = pd.DataFrame(
         [
@@ -471,6 +647,7 @@ def test_ciq_metric_aliases_feed_the_factor_vocabulary(tmp_path) -> None:
                 "as_of_date": "2026-02-01",
                 "IQ_TOTAL_REV": 100,
                 "IQ_EBITDA": 20,
+                "IQ_ROC": 8.5,
             }
         ]
     ).to_csv(source, index=False)
@@ -480,12 +657,13 @@ def test_ciq_metric_aliases_feed_the_factor_vocabulary(tmp_path) -> None:
 
     result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.FUNDAMENTALS)
 
-    assert result.imported_rows == 2
+    assert result.imported_rows == 3
     metrics = store.query_df("SELECT metric, value FROM fundamentals ORDER BY metric").set_index(
         "metric"
     )["value"]
     assert metrics["revenue"] == pytest.approx(100)
     assert metrics["ebitda"] == pytest.approx(20)
+    assert metrics["roic"] == pytest.approx(0.085)
 
 
 def test_missing_estimate_value_is_rejected_as_warning(tmp_path) -> None:
@@ -551,6 +729,65 @@ def test_current_snapshot_requires_explicit_timestamps(tmp_path) -> None:
     assert imported["company_id"] == "123456"
     assert imported["ticker"] == "EXM"
     assert imported["company_name"] == "Example Company"
+
+
+def test_current_fundamentals_snapshot_is_live_only_and_keeps_filing_date(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "current-fundamentals.duckdb")
+    store.initialize()
+    source = tmp_path / "fundamentals.csv"
+    pd.DataFrame(
+        [
+            {
+                "SP_ENTITY_ID": 123456,
+                "SP_EXCHANGE_TICKER": "NYSE:EXM",
+                "IQ_PERIOD_END": "2025-12-31",
+                "period_type": "FY",
+                "IQ_FINL_FILING_DATE": "2026-02-01",
+                "IQ_TOTAL_REV": 100,
+            }
+        ]
+    ).to_csv(source, index=False)
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(
+        source,
+        DatasetKind.FUNDAMENTALS,
+        current_snapshot_as_of=date(2026, 9, 1),
+        current_snapshot_effective_at=datetime(2026, 9, 1, 4, 30),
+    )
+
+    assert result.imported_rows == 1
+    imported = store.query_df("SELECT * FROM fundamentals").iloc[0]
+    assert imported["as_of_date"] == pd.Timestamp("2026-09-01")
+    assert imported["effective_at"] == pd.Timestamp("2026-02-01 23:59:59.999999")
+    source_row = store.query_df("SELECT metadata_json FROM source_files").iloc[0]
+    assert '"source_scope": "current_snapshot"' in source_row["metadata_json"]
+
+
+def test_current_fundamentals_snapshot_requires_source_filing_date(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "missing-filing-date.duckdb")
+    store.initialize()
+    source = tmp_path / "fundamentals.csv"
+    pd.DataFrame(
+        [
+            {
+                "SP_ENTITY_ID": 123456,
+                "SP_EXCHANGE_TICKER": "NYSE:EXM",
+                "IQ_PERIOD_END": "2025-12-31",
+                "period_type": "FY",
+                "IQ_TOTAL_REV": 100,
+            }
+        ]
+    ).to_csv(source, index=False)
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    with pytest.raises(ValueError, match="Financial Filing Date"):
+        CapitalIQImporter(store, settings).import_file(
+            source,
+            DatasetKind.FUNDAMENTALS,
+            current_snapshot_as_of=date(2026, 9, 1),
+            current_snapshot_effective_at=datetime(2026, 9, 1, 4, 30),
+        )
 
 
 def test_certification_parameterizes_synthetic_source_pattern() -> None:

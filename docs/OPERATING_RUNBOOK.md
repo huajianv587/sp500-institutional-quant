@@ -28,6 +28,37 @@ time.
 Create a local staging directory such as `data/exports/ciq/`. It is ignored by
 Git. Never upload licensed workbooks to GitHub.
 
+### Current live-research loop
+
+For day-to-day company research, start with the two verified Capital IQ saved
+screens:
+
+- `TRAINING_V3_SP500_INSTITUTIONAL_FACTORS_CURRENT`
+- `TRAINING_V3_SP500_ESTIMATES_REVISIONS_CURRENT`
+
+Export them as **Results As Table Function**, then import with the actual
+download timestamp. The first screen must retain Financial Filing Date; the
+second must retain FY+1 EPS Period End. After import:
+
+```bash
+uv run python scripts/audit_current_snapshot.py --as-of 2026-09-01
+uv run sp500iq factor-snapshot --as-of 2026-09-01 --top 25
+```
+
+The verified current snapshot has all six factor families, with 489 companies
+covered by revisions. The same command at `2026-08-31` returns zero investable
+companies, which is the expected proof that the 2026-09-01 Capital IQ snapshots
+cannot leak backward. The displayed leaders are research candidates, not an
+automatic investment list.
+
+The verified live Agent smoke uses one immutable EvidencePacket and the full
+nine-node graph. `deepseek-v4-pro` completed four independent analysts, two
+bull/bear rounds and a consensus judge; every accepted judge reference resolved
+to an exact Evidence ID. A separate no-debate judge reuses the independent
+analyst cache. This smoke proves API/schema/evidence integration only. Run the
+frozen multi-sector model benchmark and 24-month Agent study before making model
+quality or strategy-performance claims.
+
 ### A. Instruments
 
 One current S&P 500 export is enough for the current display layer:

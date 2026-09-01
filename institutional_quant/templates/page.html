@@ -55,8 +55,8 @@
           <option value="insider_transactions">Insider transactions</option>
         </select></label>
         <label>Capital IQ CSV/XLSX<input name="file" type="file" accept=".csv,.xlsx,.xls" required></label>
-        <label>Current snapshot as-of (instruments only)<input name="current_snapshot_as_of" type="date"></label>
-        <label>Observed at (instruments only)<input name="current_snapshot_effective_at" type="datetime-local"></label>
+        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"></label>
+        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"></label>
         <button type="submit">Validate and import</button>
       </form>
       <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>

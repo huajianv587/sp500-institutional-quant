@@ -134,7 +134,10 @@ class ConsensusDecision(BaseModel):
     rating: Rating
     score_adjustment: float = Field(ge=-0.10, le=0.10)
     summary: str
-    supporting_evidence: list[str] = Field(min_length=1)
+    supporting_evidence: list[str] = Field(
+        min_length=1,
+        description="Exact EvidencePacket evidence_id values only; never prose or inline citations.",
+    )
     dissent: str
     uncertainties: list[str]
     analyst_median_score: float = Field(ge=-2.0, le=2.0)

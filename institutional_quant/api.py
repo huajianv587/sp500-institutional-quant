@@ -360,7 +360,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             context["certified"] = certified
             context["certification_notes"] = notes
-        factor_date = store.latest_available_date("prices")
+        available_factor_dates = [
+            value
+            for value in (
+                store.latest_available_date("prices"),
+                store.latest_available_date("fundamentals"),
+                store.latest_available_date("estimates"),
+            )
+            if value is not None
+        ]
+        factor_date = (
+            min(max(available_factor_dates), date.today()) if available_factor_dates else None
+        )
         if slug == "factor-lab" and factor_date:
             try:
                 snapshot = FactorEngine(store).snapshot(factor_date)

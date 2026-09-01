@@ -14,6 +14,7 @@ from .backtest import BacktestEngine
 from .case_study import CaseStudyRunner
 from .config import Settings
 from .demo import build_synthetic_demo
+from .factors import FactorEngine
 from .index_data import PublicSP500MembershipSync
 from .ingestion import CapitalIQImporter
 from .market_data import AlpacaHistoricalPriceSync, YahooHistoricalPriceSync
@@ -65,13 +66,11 @@ def import_ciq(
     path: Path,
     current_snapshot_as_of: Annotated[
         str | None,
-        typer.Option(help="Explicit as-of date for a current instruments snapshot only"),
+        typer.Option(help="Explicit as-of date for a non-historical current snapshot"),
     ] = None,
     current_snapshot_effective_at: Annotated[
         str | None,
-        typer.Option(
-            help="Explicit availability timestamp for a current instruments snapshot only"
-        ),
+        typer.Option(help="Observed-at timestamp for a non-historical current snapshot"),
     ] = None,
 ) -> None:
     """Validate, archive and ingest one Capital IQ CSV/XLSX export."""
@@ -92,6 +91,65 @@ def import_ciq(
         current_snapshot_effective_at=parsed_effective_at,
     )
     typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("factor-snapshot")
+def factor_snapshot(
+    as_of: Annotated[str, typer.Option("--as-of", help="Research cut-off date")],
+    top: int = 25,
+    persist: bool = False,
+) -> None:
+    """Calculate an auditable factor cross-section for one research date."""
+    load_dotenv()
+    settings = Settings.from_env()
+    store = create_store(settings)
+    store.initialize()
+    engine = FactorEngine(store)
+    snapshot = engine.snapshot(date.fromisoformat(as_of))
+    eligible = snapshot.dropna(subset=["factor_score"]).copy()
+    if persist and not eligible.empty:
+        engine.persist(eligible)
+    family_columns = [
+        "factor_value",
+        "factor_quality",
+        "factor_growth",
+        "factor_revisions",
+        "factor_momentum",
+        "factor_low_risk",
+    ]
+    rankings = eligible.nlargest(top, "factor_score")
+    ranking_columns = [
+        "company_id",
+        "ticker",
+        "company_name",
+        "sector",
+        "factor_score",
+        *family_columns,
+    ]
+    ranking_records = (
+        rankings[ranking_columns]
+        .astype(object)
+        .where(rankings[ranking_columns].notna(), None)
+        .to_dict(orient="records")
+    )
+    typer.echo(
+        json.dumps(
+            {
+                "as_of_date": as_of,
+                "companies": len(snapshot),
+                "investable": len(eligible),
+                "persisted": bool(persist and not eligible.empty),
+                "family_coverage": {
+                    column.removeprefix("factor_"): int(snapshot[column].notna().sum())
+                    for column in family_columns
+                },
+                "top": ranking_records,
+            },
+            indent=2,
+            default=str,
+            allow_nan=False,
+        )
+    )
 
 
 @app.command("synthetic-demo")

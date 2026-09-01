@@ -60,7 +60,12 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "metric": ("metric", "data_item", "item", "field"),
     "value": ("value", "metric_value", "data_value"),
     "unit": ("unit", "units"),
-    "fiscal_period": ("fiscal_period", "fiscal_period_end", "estimate_period"),
+    "fiscal_period": (
+        "fiscal_period",
+        "fiscal_period_end",
+        "estimate_period",
+        "sp_eps_norm_date_est",
+    ),
     "valid_to": ("valid_to", "sptodate", "sp_to_date"),
     "price_date": ("price_date", "date", "trading_date"),
     "open": ("open", "open_price"),
@@ -86,19 +91,26 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "iq_total_revenue": "revenue",
     "total_revenue": "revenue",
     "iq_net_income": "net_income",
+    "iq_net_inc_parent": "net_income",
     "iq_fcf": "free_cash_flow",
     "iq_free_cash_flow": "free_cash_flow",
     "iq_cash_from_ops": "operating_cash_flow",
     "iq_cash_from_oper": "operating_cash_flow",
+    "iq_cash_oper": "operating_cash_flow",
     "iq_operating_cash_flow": "operating_cash_flow",
     "cash_from_operations": "operating_cash_flow",
     "iq_ebitda": "ebitda",
     "iq_nopat": "nopat",
     "iq_invested_capital": "invested_capital",
     "iq_gross_profit": "gross_profit",
+    "iq_gp": "gross_profit",
     "iq_total_assets": "total_assets",
+    "iq_total_debt": "total_debt",
+    "iq_total_equity": "total_equity",
+    "iq_capex": "capital_expenditure",
     "iq_net_debt": "net_debt",
     "iq_market_cap": "market_cap",
+    "sp_marketcap": "market_cap",
     "market_capitalization": "market_cap",
     "iq_tev": "enterprise_value",
     "iq_total_enterprise_value": "enterprise_value",
@@ -108,14 +120,41 @@ CANONICAL_METRIC_ALIASES: dict[str, str] = {
     "diluted_eps": "eps",
     "iq_operating_margin": "operating_margin",
     "iq_oper_margin": "operating_margin",
+    "iq_total_rev_1yr_ann_growth": "revenue_growth",
+    "iq_gross_margin": "gross_margin",
+    "iq_ebitda_margin": "ebitda_margin",
+    "iq_ni_margin": "net_income_margin",
+    "iq_tev_ebitda": "tev_ebitda",
+    "iq_pe": "price_to_earnings",
+    "iq_pbv_x": "price_to_book",
+    "iq_roa": "return_on_assets",
+    "iq_roc": "roic",
+    "iq_roe": "return_on_equity",
     "sp_norm_eps_act_or_est": "eps_estimate",
     "sp_normalized_eps_actual_estimate": "eps_estimate",
+    "sp_eps_norm_est": "eps_estimate",
     "sp_revenue_estimate": "revenue_estimate",
+    "sp_rev_est": "revenue_estimate",
+    "sp_eps_norm_est_num_analysts_month": "eps_analyst_count_1m",
+    "sp_eps_norm_est_up_month": "eps_up_revisions_1m",
+    "sp_eps_norm_est_down_month": "eps_down_revisions_1m",
+    "sp_eps_norm_est_up_3month": "eps_up_revisions_3m",
+    "sp_eps_norm_est_down_3month": "eps_down_revisions_3m",
     "iq_eps_revision_1m": "eps_revision_1m",
     "eps_revision_1_month": "eps_revision_1m",
     "iq_eps_revision_3m": "eps_revision_3m",
     "eps_revision_3_month": "eps_revision_3m",
     "iq_estimate_surprise": "estimate_surprise",
+}
+
+CIQ_PERCENTAGE_POINT_METRICS = {
+    "iq_total_rev_1yr_ann_growth",
+    "iq_gross_margin",
+    "iq_ebitda_margin",
+    "iq_ni_margin",
+    "iq_roa",
+    "iq_roc",
+    "iq_roe",
 }
 
 
@@ -359,7 +398,7 @@ class CapitalIQImporter:
             ):
                 as_of_dates.add(date(int(year), int(month), int(day)).isoformat())
             match = re.search(
-                r'SPGLabel\([^,]+,\s*([^,]+),\s*"([A-Za-z]+[+-]?\d+)"',
+                r'SPGLabel\([^,]+,\s*([^,]+),\s*"([A-Za-z]+(?:[+-]?\d+)?)"',
                 formula,
             )
             if match:
@@ -395,7 +434,39 @@ class CapitalIQImporter:
                 for value in row
                 if isinstance(value, str) and value.startswith("=")
             ]
-            return CapitalIQImporter._parse_spg_formula_metadata(formulas)
+            metadata = CapitalIQImporter._parse_spg_formula_metadata(formulas)
+            table_row = next(
+                (
+                    row_number
+                    for row_number in range(1, min(sheet.max_row, 12) + 1)
+                    if any(
+                        isinstance(sheet.cell(row_number, column).value, str)
+                        and "SPGTable" in sheet.cell(row_number, column).value
+                        for column in range(1, sheet.max_column + 1)
+                    )
+                ),
+                None,
+            )
+            if table_row is not None and table_row + 1 <= sheet.max_row:
+                preview = pd.read_excel(path, header=None, nrows=25)
+                header_row = CapitalIQImporter._detect_header_row(preview)
+                by_header: dict[str, set[str]] = {}
+                for column in range(1, min(sheet.max_column, preview.shape[1]) + 1):
+                    header = preview.iloc[header_row, column - 1]
+                    formula = sheet.cell(table_row + 1, column).value
+                    if pd.isna(header) or not isinstance(formula, str) or "SPGLabel" not in formula:
+                        continue
+                    match = re.search(
+                        r'SPGLabel\([^,]+,\s*[^,]+,\s*"([A-Za-z]+(?:[+-]?\d+)?)"',
+                        formula,
+                    )
+                    if match:
+                        by_header.setdefault(_column_key(header), set()).add(match.group(1).upper())
+                if by_header:
+                    metadata["embedded_period_codes_by_header"] = {
+                        header: sorted(codes) for header, codes in sorted(by_header.items())
+                    }
+            return metadata
         finally:
             workbook.close()
 
@@ -486,7 +557,7 @@ class CapitalIQImporter:
                 if pd.notna(value) and str(value).strip()
             ]
             return bool(values) and all(
-                re.fullmatch(r"[A-Za-z]+[+-]?\d+", value) for value in values
+                re.fullmatch(r"[A-Za-z]+(?:[+-]?\d+)?", value) for value in values
             )
 
         parameter_rows = missing_identity & frame.apply(is_parameter_row, axis=1)
@@ -544,8 +615,14 @@ class CapitalIQImporter:
             "valid_to",
             "as_of_date",
             "unit",
+            "sector",
         }
-        value_columns = [column for column in frame.columns if column not in identity]
+        metadata_columns = {"mi_primary_industry", "iq_primary_industry"}
+        value_columns = [
+            column
+            for column in frame.columns
+            if column not in identity and _column_key(column) not in metadata_columns
+        ]
         if not value_columns:
             return frame
         return frame.melt(
@@ -554,6 +631,46 @@ class CapitalIQImporter:
             var_name="metric",
             value_name="value",
         )
+
+    @staticmethod
+    def _derive_fundamental_period_types(
+        frame: pd.DataFrame,
+        source_metadata: dict[str, object],
+        *,
+        current_snapshot_as_of: date | None = None,
+        current_snapshot_effective_at: datetime | None = None,
+    ) -> pd.DataFrame:
+        """Assign each wide CIQ metric its own FY/LTM/current period semantics."""
+        if "metric" not in frame.columns:
+            return frame
+        derived = frame.copy()
+        header_periods = source_metadata.get("embedded_period_codes_by_header")
+        period_by_header = header_periods if isinstance(header_periods, dict) else {}
+
+        def period_type(metric: object) -> str | None:
+            codes = period_by_header.get(_column_key(metric), [])
+            if not isinstance(codes, list) or len(codes) != 1:
+                return None
+            match = re.match(r"[A-Za-z]+", str(codes[0]))
+            return match.group(0).upper() if match else None
+
+        inferred = derived["metric"].map(period_type)
+        if "period_type" not in derived.columns:
+            derived["period_type"] = inferred
+        else:
+            derived["period_type"] = derived["period_type"].fillna(inferred)
+
+        if current_snapshot_as_of is not None:
+            current_metric_keys = {"sp_marketcap", "iq_tev"}
+            current_mask = derived["metric"].map(_column_key).isin(current_metric_keys)
+            if current_mask.any():
+                derived.loc[current_mask, "period_type"] = "CURRENT"
+                derived["period_end"] = derived["period_end"].astype(object)
+                derived.loc[current_mask, "period_end"] = current_snapshot_as_of
+                if current_snapshot_effective_at is not None:
+                    derived["effective_at"] = derived["effective_at"].astype(object)
+                    derived.loc[current_mask, "effective_at"] = current_snapshot_effective_at
+        return derived
 
     def import_file(
         self,
@@ -567,8 +684,16 @@ class CapitalIQImporter:
             value is not None for value in (current_snapshot_as_of, current_snapshot_effective_at)
         )
         if current_snapshot:
-            if dataset is not DatasetKind.INSTRUMENTS:
-                raise ValueError("Current-snapshot timestamps are permitted only for instruments")
+            allowed_current = {
+                DatasetKind.INSTRUMENTS,
+                DatasetKind.FUNDAMENTALS,
+                DatasetKind.ESTIMATES,
+            }
+            if dataset not in allowed_current:
+                raise ValueError(
+                    "Current-snapshot timestamps are permitted only for instruments, "
+                    "fundamentals, and estimates"
+                )
             if current_snapshot_as_of is None or current_snapshot_effective_at is None:
                 raise ValueError(
                     "Both current_snapshot_as_of and current_snapshot_effective_at are required"
@@ -597,7 +722,10 @@ class CapitalIQImporter:
         safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", source.name)
         archived = self.settings.raw_data_dir / dataset.value / f"{digest[:12]}_{safe_name}"
         archived.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, archived)
+        # External exFAT/APFS volumes can reject macOS file flags during copy2's
+        # copystat phase.  The immutable archive is content-addressed and audited
+        # by SHA-256, so copying bytes is the portable and sufficient operation.
+        shutil.copyfile(source, archived)
 
         frame, source_metadata = self.read_with_metadata(archived)
         source_column_keys = {_column_key(column) for column in frame.columns}
@@ -610,6 +738,15 @@ class CapitalIQImporter:
         frame = self._rename_columns(frame)
         frame = self._normalize_identifiers(frame)
         frame, parameter_rows_dropped = self._drop_parameter_rows(frame)
+        if (
+            current_snapshot
+            and dataset is DatasetKind.FUNDAMENTALS
+            and "effective_at" not in frame.columns
+        ):
+            raise ValueError(
+                "A current fundamentals snapshot still requires a source-provided "
+                "Financial Filing Date/effective_at column"
+            )
         if current_snapshot:
             if "as_of_date" not in frame.columns:
                 frame["as_of_date"] = current_snapshot_as_of
@@ -646,7 +783,25 @@ class CapitalIQImporter:
                     "shift_companion_period_end_by_spg_period_code"
                 )
         frame = self._wide_to_long(frame, dataset)
+        if dataset is DatasetKind.FUNDAMENTALS:
+            frame = self._derive_fundamental_period_types(
+                frame,
+                source_metadata,
+                current_snapshot_as_of=current_snapshot_as_of if current_snapshot else None,
+                current_snapshot_effective_at=(
+                    current_snapshot_effective_at if current_snapshot else None
+                ),
+            )
+        ciq_percentage_points = pd.Series(False, index=frame.index)
         if "metric" in frame.columns:
+            ciq_percentage_points = (
+                frame["metric"].map(_column_key).isin(CIQ_PERCENTAGE_POINT_METRICS)
+            )
+            if ciq_percentage_points.any():
+                source_metadata["value_normalization"] = {
+                    "ciq_percentage_points": "divide_by_100",
+                    "metrics": sorted(CIQ_PERCENTAGE_POINT_METRICS),
+                }
             frame["metric"] = frame["metric"].map(
                 lambda value: CANONICAL_METRIC_ALIASES.get(_column_key(value), _column_key(value))
             )
@@ -707,6 +862,10 @@ class CapitalIQImporter:
         }
         for column in numeric_columns.intersection(frame.columns):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if "value" in frame.columns and ciq_percentage_points.any():
+            frame.loc[ciq_percentage_points, "value"] = (
+                frame.loc[ciq_percentage_points, "value"] / 100.0
+            )
 
         required_nulls = frame[list(contract.required)].isna().any(axis=1)
         rejected_rows = int(required_nulls.sum())

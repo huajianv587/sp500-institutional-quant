@@ -43,7 +43,6 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
     rng = np.random.default_rng(17)
     companies = [f"SYN{i:03d}" for i in range(35)]
     tickers = [f"Q{i:02d}" for i in range(35)]
-    as_of = date(2026, 9, 1)
     instruments = pd.DataFrame(
         {
             "company_id": companies,
@@ -52,7 +51,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
             "sector": [SECTORS[i % len(SECTORS)] for i in range(35)],
             "currency": "USD",
             "effective_at": "2016-01-01T00:00:00Z",
-            "as_of_date": as_of,
+            "as_of_date": date(2016, 1, 1),
         }
     )
     membership = pd.DataFrame(
@@ -63,7 +62,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
             "member_from": date(2016, 1, 1),
             "member_to": None,
             "effective_at": "2016-01-01T00:00:00Z",
-            "as_of_date": as_of,
+            "as_of_date": date(2016, 1, 1),
         }
     )
     days = pd.bdate_range("2017-01-03", "2026-09-01")
@@ -87,7 +86,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                     "volume": 1_000_000 + index * 10_000,
                     "source": "synthetic",
                     "effective_at": f"{day.date()}T23:00:00Z",
-                    "as_of_date": as_of,
+                    "as_of_date": day.date(),
                 }
             )
     spy = 100 * np.exp(np.cumsum(market_shocks))
@@ -105,7 +104,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                 "volume": 10_000_000,
                 "source": "synthetic",
                 "effective_at": f"{day.date()}T23:00:00Z",
-                "as_of_date": as_of,
+                "as_of_date": day.date(),
             }
         )
     fundamental_rows = []
@@ -150,7 +149,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                             "period_end": period.date(),
                             "period_type": "Quarterly",
                             "effective_at": f"{effective}T12:00:00Z",
-                            "as_of_date": as_of,
+                            "as_of_date": effective,
                             "metric": metric,
                             "value": value,
                             "unit": "USD",
@@ -158,10 +157,18 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                     )
             previous_revenue, previous_eps, previous_margin = revenue, eps, margin
         for month in pd.date_range("2017-01-31", "2026-08-31", freq="ME"):
-            revision = rng.normal(index % 6 * 0.002 - 0.004, 0.02)
+            analyst_count = 18 + index % 17
+            directional_bias = (index % 7) - 3
+            up_1m = int(np.clip(rng.poisson(4 + max(directional_bias, 0)), 0, analyst_count))
+            down_1m = int(np.clip(rng.poisson(4 + max(-directional_bias, 0)), 0, analyst_count))
+            up_3m = int(np.clip(rng.poisson(12 + max(directional_bias, 0)), 0, 50))
+            down_3m = int(np.clip(rng.poisson(12 + max(-directional_bias, 0)), 0, 50))
             for metric, value in {
-                "eps_revision_1m": revision,
-                "eps_revision_3m": revision * 1.8,
+                "eps_analyst_count_1m": analyst_count,
+                "eps_up_revisions_1m": up_1m,
+                "eps_down_revisions_1m": down_1m,
+                "eps_up_revisions_3m": up_3m,
+                "eps_down_revisions_3m": down_3m,
                 "estimate_surprise": rng.normal(index % 5 * 0.003, 0.025),
             }.items():
                 estimate_rows.append(
@@ -171,7 +178,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                         "fiscal_period": (month + pd.offsets.MonthEnd(3)).date(),
                         "effective_at": f"{month.date()}T20:00:00Z",
                         "valid_to": None,
-                        "as_of_date": as_of,
+                        "as_of_date": month.date(),
                         "metric": metric,
                         "value": value,
                         "unit": "ratio",

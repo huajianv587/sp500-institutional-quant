@@ -48,7 +48,12 @@ uv run sp500iq import-ciq instruments /absolute/path/current-sp500.xlsx \
   --current-snapshot-effective-at 2026-09-01T04:17:07+00:00
 ```
 
-The two current-snapshot options are restricted to `instruments`. Historical membership, fundamentals, estimates and prices must still carry their own source-provided point-in-time fields; operator-supplied timestamps are not permitted for those datasets.
+The two current-snapshot options are accepted only for `instruments`,
+`fundamentals` and `estimates`, and are always labelled live-only. Fundamentals
+still require Capital IQ's source-provided Financial Filing Date. Estimates
+still require a company-specific target fiscal period. Historical membership,
+historical fundamentals/estimates and prices must carry source-provided
+point-in-time fields; an operator timestamp never certifies history.
 
 ### Safari validation of the historical-membership gate
 
@@ -109,7 +114,44 @@ The workbook's `SPGLabel` formulas preserve both `FY0` and `08/31/2026`. The imp
 
 The validation export intentionally demonstrated the missing-identity gate: it contained Entity Name and Entity ID but not Exchange:Ticker, so it was rejected with `MISSING_REQUIRED_COLUMNS: ticker` and was not written to production. A production fundamentals export must also include `SP_EXCHANGE_TICKER`.
 
-### Verified point-in-time estimates parameters
+### Verified current institutional factor template
+
+The saved screen `TRAINING_V3_SP500_INSTITUTIONAL_FACTORS_CURRENT` uses the S&P
+500 Companies universe and exports 500 unique Entity IDs. Its verified fields
+cover revenue, gross profit, EBITDA, net income, assets, debt, equity, operating
+cash flow, capex, one-year revenue growth, margins, P/E, P/B, TEV/EBITDA, ROA,
+ROC, ROE, market capitalization, enterprise value, filing date, sector,
+industry and Exchange:Ticker.
+
+The importer assigns each metric its own `FY`, `LTM` or `CURRENT` semantics from
+the SPGLabel metadata. Capital IQ percentage-point fields are divided by 100 at
+ingestion and the normalization is recorded in the source manifest. The
+verified 2026-09-01 snapshot produced 10,223 accepted observations across 21
+canonical metrics, with no duplicate grain, future availability or future
+fundamental period. It is suitable for live research only.
+
+### Verified current estimates and revisions template
+
+The saved screen `TRAINING_V3_SP500_ESTIMATES_REVISIONS_CURRENT` contains:
+
+| Capital IQ field | Keyfield | Import meaning |
+|---|---:|---|
+| CIQ EPS Normalized Est | `290476` / `SP_EPS_NORM_EST` | `eps_estimate`, FY+1 |
+| CIQ Revenue Est | `290526` / `SP_REV_EST` | `revenue_estimate`, FY+1 |
+| EPS Normalized # of Analysts Last Month | `330485` | analyst coverage |
+| EPS Normalized # Upward / Downward Last Month | `330486` / `330491` | one-month revision counts |
+| EPS Normalized # Upward / Downward Last 3 Months | `330505` / `330506` | three-month revision counts |
+| CIQ EPS Normalized Est Period End | `290486` / `SP_EPS_NORM_DATE_EST` | company-specific FY+1 target date |
+| Exchange: Ticker | `331277` / `SP_EXCHANGE_TICKER` | point-in-time identifier |
+
+The deterministic revision factor is `(up - down) / max(analyst coverage,
+up + down)`, bounded to `[-1, 1]`. The verified 2026-09-01 workbook held 500
+unique companies; 497 had valid target periods. It produced 3,434 accepted
+observations across seven estimate metrics, with revision-family coverage for
+489 companies. Capital IQ NA values and the three missing target periods were
+rejected and recorded, never imputed.
+
+### Earlier self-contained historical estimate validation
 
 The verified estimate template uses the following self-contained fields as of `2026-08-31`:
 

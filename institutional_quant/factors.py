@@ -7,7 +7,7 @@ from datetime import date, datetime, time, timedelta
 import numpy as np
 import pandas as pd
 
-from .calculations import derive_fundamental_features
+from .calculations import derive_estimate_revision_features, derive_fundamental_features
 from .storage import Store
 
 FACTOR_FAMILIES: dict[str, dict[str, float]] = {
@@ -110,12 +110,12 @@ class FactorEngine:
                            ORDER BY {period_column} DESC, effective_at DESC
                        ) AS rn
                 FROM {table}
-                WHERE effective_at <= ?
+                WHERE effective_at <= ? AND as_of_date <= ?
             )
             SELECT company_id, metric, value, source_file_id, effective_at
             FROM ranked WHERE rn = 1
             """,
-            [cutoff],
+            [cutoff, as_of_date],
         )
         if frame.empty:
             return pd.DataFrame(), []
@@ -188,6 +188,7 @@ class FactorEngine:
         frame = frame.merge(estimates, on="company_id", how="left", suffixes=("", "_estimate"))
         frame = frame.merge(market, on="company_id", how="left")
         frame = derive_fundamental_features(frame)
+        frame = derive_estimate_revision_features(frame)
 
         all_features = sorted(
             {feature for features in FACTOR_FAMILIES.values() for feature in features}
