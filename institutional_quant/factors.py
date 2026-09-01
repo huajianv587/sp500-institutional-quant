@@ -7,7 +7,11 @@ from datetime import date, datetime, time, timedelta
 import numpy as np
 import pandas as pd
 
-from .calculations import derive_estimate_revision_features, derive_fundamental_features
+from .calculations import (
+    derive_estimate_revision_features,
+    derive_fundamental_features,
+    derive_point_in_time_estimate_changes,
+)
 from .storage import Store
 
 FACTOR_FAMILIES: dict[str, dict[str, float]] = {
@@ -178,15 +182,55 @@ class FactorEngine:
             )
         return pd.DataFrame(output), sources
 
+    def _historical_estimate_changes(self, as_of_date: date) -> tuple[pd.DataFrame, list[str]]:
+        cutoff = datetime.combine(as_of_date, time.max)
+        history_start = (pd.Timestamp(as_of_date) - pd.DateOffset(months=4)).date()
+        history = self.store.query_df(
+            """
+            SELECT company_id, fiscal_period, as_of_date, effective_at, value,
+                   source_file_id, ingested_at
+            FROM estimates
+            WHERE metric = 'eps_estimate'
+              AND as_of_date BETWEEN ? AND ?
+              AND effective_at <= ?
+            ORDER BY company_id, as_of_date, effective_at, ingested_at
+            """,
+            [history_start, as_of_date, cutoff],
+        )
+        if history.empty:
+            return pd.DataFrame(columns=["company_id"]), []
+        sources = sorted(set(history["source_file_id"].astype(str)))
+        changes = derive_point_in_time_estimate_changes(history, as_of_date)
+        return changes, sources
+
     def snapshot(self, as_of_date: date) -> pd.DataFrame:
         universe = self._universe(as_of_date)
         if universe.empty:
             raise ValueError(f"No historical S&P 500 membership for {as_of_date}")
         fundamentals, fundamental_sources = self._latest_metrics("fundamentals", as_of_date)
         estimates, estimate_sources = self._latest_metrics("estimates", as_of_date)
+        estimate_changes, estimate_change_sources = self._historical_estimate_changes(as_of_date)
         market, price_sources = self._market_features(universe, as_of_date)
         frame = universe.merge(fundamentals, on="company_id", how="left")
         frame = frame.merge(estimates, on="company_id", how="left", suffixes=("", "_estimate"))
+        frame = frame.merge(
+            estimate_changes,
+            on="company_id",
+            how="left",
+            suffixes=("", "_from_history"),
+        )
+        for window in ("1m", "3m"):
+            column = f"eps_revision_{window}"
+            historical_column = f"{column}_from_history"
+            if historical_column not in frame:
+                continue
+            if column in frame:
+                frame[column] = pd.to_numeric(frame[column], errors="coerce").fillna(
+                    frame[historical_column]
+                )
+            else:
+                frame[column] = frame[historical_column]
+            frame = frame.drop(columns=historical_column)
         frame = frame.merge(market, on="company_id", how="left")
         frame = derive_fundamental_features(frame)
         frame = derive_estimate_revision_features(frame)
@@ -206,7 +250,9 @@ class FactorEngine:
             frame[f"factor_{family}"] = pd.concat(components, axis=1).mean(axis=1, skipna=True)
         frame = _combine_factor_families(frame)
 
-        source_ids = sorted(set(fundamental_sources + estimate_sources + price_sources))
+        source_ids = sorted(
+            set(fundamental_sources + estimate_sources + estimate_change_sources + price_sources)
+        )
         snapshot_payload = {
             "as_of_date": as_of_date.isoformat(),
             "source_ids": source_ids,

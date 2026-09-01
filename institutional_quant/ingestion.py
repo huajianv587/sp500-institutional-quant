@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import shutil
 from collections.abc import Iterable
@@ -155,6 +156,16 @@ CIQ_PERCENTAGE_POINT_METRICS = {
     "iq_roa",
     "iq_roc",
     "iq_roe",
+}
+
+# Capital IQ's LTM valuation multiples are themselves observable on the
+# requested as-of date.  They do not share a fiscal filing timestamp with the
+# FY statement fields, so pairing them to an FY0 filing date would be
+# semantically wrong.  Preserve their LTM period type while using the vendor
+# snapshot date as both the analytical period anchor and availability date.
+CIQ_AS_OF_FUNDAMENTAL_METRICS = {
+    "iq_pe",
+    "iq_tev_ebitda",
 }
 
 
@@ -687,9 +698,7 @@ class CapitalIQImporter:
             "valid_to",
         }
         identity_aliases = {
-            alias
-            for canonical in identity_canonicals
-            for alias in ALIASES.get(canonical, ())
+            alias for canonical in identity_canonicals for alias in ALIASES.get(canonical, ())
         }
         identity_columns = [
             str(column) for column in frame.columns if _column_key(column) in identity_aliases
@@ -703,8 +712,7 @@ class CapitalIQImporter:
         value_columns = [
             item
             for item in dated
-            if item not in period_columns
-            and str(item.get("header_key")) not in identity_aliases
+            if item not in period_columns and str(item.get("header_key")) not in identity_aliases
         ]
         if not value_columns:
             return frame
@@ -773,12 +781,8 @@ class CapitalIQImporter:
 
         period_aliases = set(ALIASES["period_end"])
         filing_aliases = set(ALIASES["effective_at"])
-        period_columns = [
-            item for item in dated if str(item.get("header_key")) in period_aliases
-        ]
-        filing_columns = [
-            item for item in dated if str(item.get("header_key")) in filing_aliases
-        ]
+        period_columns = [item for item in dated if str(item.get("header_key")) in period_aliases]
+        filing_columns = [item for item in dated if str(item.get("header_key")) in filing_aliases]
         identity_canonicals = {
             "company_id",
             "ticker",
@@ -788,9 +792,7 @@ class CapitalIQImporter:
             "unit",
         }
         identity_aliases = {
-            alias
-            for canonical in identity_canonicals
-            for alias in ALIASES.get(canonical, ())
+            alias for canonical in identity_canonicals for alias in ALIASES.get(canonical, ())
         }
         identity_columns = [
             str(column) for column in frame.columns if _column_key(column) in identity_aliases
@@ -826,22 +828,31 @@ class CapitalIQImporter:
             )
 
         observations: list[pd.DataFrame] = []
+        as_of_observed_metrics: set[str] = set()
         for item in value_columns:
             as_of_date = str(item["as_of_date"])
             period_code = str(item.get("period_code", ""))
-            period = companion_for(
-                period_columns, as_of_date=as_of_date, period_code=period_code
-            )
-            filing = companion_for(
-                filing_columns, as_of_date=as_of_date, period_code=period_code
-            )
+            period = companion_for(period_columns, as_of_date=as_of_date, period_code=period_code)
+            filing = companion_for(filing_columns, as_of_date=as_of_date, period_code=period_code)
+            metric_key = _column_key(str(item.get("source_header", item["column"])))
+            is_as_of_observed = metric_key in CIQ_AS_OF_FUNDAMENTAL_METRICS
+            if is_as_of_observed:
+                as_of_observed_metrics.add(metric_key)
             selected = source_rows[identity_columns].copy()
             selected["as_of_date"] = as_of_date
             selected["period_end"] = (
-                source_rows[str(period["column"])] if period is not None else None
+                as_of_date
+                if is_as_of_observed
+                else source_rows[str(period["column"])]
+                if period is not None
+                else None
             )
             selected["effective_at"] = (
-                source_rows[str(filing["column"])] if filing is not None else None
+                as_of_date
+                if is_as_of_observed
+                else source_rows[str(filing["column"])]
+                if filing is not None
+                else None
             )
             selected["metric"] = str(item.get("source_header", item["column"]))
             selected["value"] = source_rows[str(item["column"])]
@@ -853,9 +864,12 @@ class CapitalIQImporter:
         source_metadata["fundamental_availability_source"] = (
             "same_as_of_spg_financial_filing_date_by_column"
         )
-        source_metadata["fundamental_period_policy"] = (
-            "pair_same_as_of_and_period_code_companion"
-        )
+        source_metadata["fundamental_period_policy"] = "pair_same_as_of_and_period_code_companion"
+        if as_of_observed_metrics:
+            source_metadata["as_of_observed_fundamental_metrics"] = sorted(as_of_observed_metrics)
+            source_metadata["as_of_observed_metric_policy"] = (
+                "period_end_and_effective_at_equal_embedded_spg_as_of_date"
+            )
         return pd.concat(observations, ignore_index=True)
 
     @staticmethod
@@ -997,6 +1011,10 @@ class CapitalIQImporter:
             source_metadata["date_only_availability_policy"] = "end_of_day"
         if dataset is DatasetKind.FUNDAMENTALS:
             frame = self._expand_historical_fundamental_snapshots(frame, source_metadata)
+            if source_metadata.get("historical_snapshot_dates"):
+                date_only_availability = True
+                source_metadata["effective_at_granularity"] = "date"
+                source_metadata["date_only_availability_policy"] = "end_of_day"
         elif dataset is DatasetKind.ESTIMATES:
             frame = self._expand_historical_estimate_snapshots(frame, source_metadata)
             if source_metadata.get("historical_snapshot_dates"):
@@ -1140,10 +1158,16 @@ class CapitalIQImporter:
         if rejected_rows:
             value_only_missing = pd.Series(False, index=frame.index)
             if dataset in {DatasetKind.FUNDAMENTALS, DatasetKind.ESTIMATES}:
-                non_value_required = [column for column in contract.required if column != "value"]
-                value_only_missing = frame["value"].isna() & frame[non_value_required].notna().all(
-                    axis=1
-                )
+                # CIQ returns a completely empty metric cell together with empty
+                # period companions when no observation exists for a company.
+                # That is ordinary cross-sectional missingness, not a malformed
+                # timestamp.  Identity/provenance must still be present, and any
+                # row with a numeric value but a missing period or availability
+                # timestamp remains a fatal point-in-time error.
+                observation_identity = ["company_id", "ticker", "as_of_date", "metric"]
+                value_only_missing = frame["value"].isna() & frame[
+                    observation_identity
+                ].notna().all(axis=1)
             fatal_count = int((required_nulls & ~value_only_missing).sum())
             unavailable_count = int((required_nulls & value_only_missing).sum())
             if unavailable_count:
@@ -1209,6 +1233,7 @@ class CapitalIQImporter:
                     if current_snapshot
                     else "embedded_spg_formula_and_source_columns"
                     if source_metadata.get("embedded_as_of_date")
+                    or source_metadata.get("historical_snapshot_dates")
                     else "source_columns"
                 ),
                 "source_formula_metadata": source_metadata,
@@ -1229,6 +1254,8 @@ class CapitalIQImporter:
 def certify_point_in_time(
     store: Store, start_date, end_date, required: Iterable[str] | None = None
 ) -> tuple[bool, list[str]]:
+    minimum_company_coverage = 400
+    minimum_universe_coverage = 0.90
     required = tuple(required or ("index_membership", "fundamentals", "estimates", "prices"))
     notes: list[str] = []
     coverage_failures: list[str] = []
@@ -1244,6 +1271,83 @@ def certify_point_in_time(
     missing = [dataset for dataset in required if dataset not in status]
     if missing:
         notes.append(f"Missing authoritative datasets: {', '.join(missing)}")
+
+    membership_intervals: pd.DataFrame | None = None
+
+    def historical_universe_coverage(
+        presence: pd.DataFrame,
+        *,
+        frequency: str,
+        label: str,
+    ) -> list[str]:
+        nonlocal membership_intervals
+        if membership_intervals is None:
+            membership_intervals = store.query_df(
+                """
+                SELECT company_id, member_from, member_to
+                FROM index_membership WHERE index_code = 'SP500'
+                """
+            )
+            if not membership_intervals.empty:
+                membership_intervals = membership_intervals.copy()
+                membership_intervals["company_id"] = membership_intervals["company_id"].astype(str)
+                membership_intervals["member_from"] = pd.to_datetime(
+                    membership_intervals["member_from"], errors="coerce"
+                )
+                membership_intervals["member_to"] = pd.to_datetime(
+                    membership_intervals["member_to"], errors="coerce"
+                )
+        expected_periods = set(pd.period_range(start_date, end_date, freq=frequency))
+        if membership_intervals.empty:
+            return [f"Cannot measure {label} coverage without historical membership intervals"]
+
+        clean = presence.copy()
+        if not clean.empty:
+            clean["snapshot_date"] = pd.to_datetime(clean["snapshot_date"], errors="coerce")
+            clean = clean.dropna(subset=["snapshot_date", "company_id"])
+            clean["company_id"] = clean["company_id"].astype(str)
+
+        best: dict[pd.Period, tuple[int, int, float]] = {}
+        for snapshot_date, rows in clean.groupby("snapshot_date"):
+            period = snapshot_date.to_period(frequency)
+            if period not in expected_periods:
+                continue
+            active = membership_intervals.loc[
+                (membership_intervals["member_from"] <= snapshot_date)
+                & (
+                    membership_intervals["member_to"].isna()
+                    | (membership_intervals["member_to"] >= snapshot_date)
+                ),
+                "company_id",
+            ]
+            active_ids = set(active)
+            covered = len(active_ids.intersection(rows["company_id"]))
+            active_count = len(active_ids)
+            ratio = covered / active_count if active_count else 0.0
+            if period not in best or ratio > best[period][2]:
+                best[period] = (covered, active_count, ratio)
+
+        weak: list[tuple[pd.Period, int, int, float]] = []
+        for period in sorted(expected_periods):
+            covered, active_count, ratio = best.get(period, (0, 0, 0.0))
+            required_companies = max(
+                minimum_company_coverage,
+                math.ceil(active_count * minimum_universe_coverage),
+            )
+            if active_count == 0 or covered < required_companies:
+                weak.append((period, covered, active_count, ratio))
+        if not weak:
+            return []
+        preview = ", ".join(
+            f"{period} ({covered}/{active}; {ratio:.1%})"
+            for period, covered, active, ratio in weak[:6]
+        )
+        suffix = " ..." if len(weak) > 6 else ""
+        return [
+            f"{label} cover fewer than {minimum_universe_coverage:.0%} of the historical "
+            f"S&P 500 universe in {len(weak)} {frequency.lower()} snapshot(s): "
+            f"{preview}{suffix}"
+        ]
 
     if "fundamentals" in status:
         fundamental_dates = store.query_df(
@@ -1267,45 +1371,70 @@ def certify_point_in_time(
                     "Point-in-time fundamentals end too early for the requested backtest end"
                 )
 
-    if "estimates" in status:
-        estimate_dates = store.query_df(
+        fundamental_presence = store.query_df(
             """
-            SELECT DISTINCT effective_at FROM estimates
-            WHERE effective_at >= ? AND effective_at < ? ORDER BY effective_at
+            SELECT DISTINCT as_of_date AS snapshot_date, company_id
+            FROM fundamentals
+            WHERE as_of_date BETWEEN ? AND ?
+            ORDER BY as_of_date, company_id
             """,
-            [
-                datetime.combine(start_date, datetime.min.time()),
-                datetime.combine(end_date + pd.Timedelta(days=1), datetime.min.time()),
-            ],
+            [start_date, end_date],
         )
-        observed_months = {
-            pd.Timestamp(value).to_period("M")
-            for value in estimate_dates.get("effective_at", [])
-            if not pd.isna(value)
-        }
-        expected_months = set(pd.period_range(start_date, end_date, freq="M"))
-        missing_months = sorted(expected_months - observed_months)
-        if missing_months:
-            preview = ", ".join(str(month) for month in missing_months[:6])
-            suffix = " ..." if len(missing_months) > 6 else ""
-            coverage_failures.append(
-                "Point-in-time estimates are missing "
-                f"{len(missing_months)} monthly signal snapshot(s): {preview}{suffix}"
+        coverage_failures.extend(
+            historical_universe_coverage(
+                fundamental_presence,
+                frequency="Q",
+                label="Point-in-time fundamentals",
             )
+        )
+
+    if "estimates" in status:
+        estimate_presence = store.query_df(
+            """
+            SELECT DISTINCT as_of_date AS snapshot_date, company_id
+            FROM estimates
+            WHERE metric = 'eps_estimate'
+              AND as_of_date BETWEEN ? AND ?
+            ORDER BY as_of_date, company_id
+            """,
+            [start_date, end_date],
+        )
+        coverage_failures.extend(
+            historical_universe_coverage(
+                estimate_presence,
+                frequency="M",
+                label="Point-in-time EPS estimates",
+            )
+        )
 
     notes.extend(coverage_failures)
 
     error_placeholders = ",".join("?" for _ in required)
     errors = store.query_df(
         f"""
-        SELECT dataset, code, COUNT(*) AS count
-        FROM data_quality_issues
-        WHERE severity = 'error'
-          AND dataset IN ({error_placeholders})
-          AND NOT (dataset = 'estimates' AND code = 'NULL_REQUIRED_VALUE')
-        GROUP BY dataset, code ORDER BY dataset, code
+        WITH relevant_research_sources AS (
+            SELECT DISTINCT 'fundamentals' AS dataset, source_file_id
+            FROM fundamentals WHERE as_of_date BETWEEN ? AND ?
+            UNION
+            SELECT DISTINCT 'estimates' AS dataset, source_file_id
+            FROM estimates WHERE as_of_date BETWEEN ? AND ?
+        )
+        SELECT issue.dataset, issue.code, COUNT(*) AS count
+        FROM data_quality_issues AS issue
+        WHERE issue.severity = 'error'
+          AND issue.dataset IN ({error_placeholders})
+          AND (
+              issue.dataset NOT IN ('fundamentals', 'estimates')
+              OR issue.source_file_id IS NULL
+              OR EXISTS (
+                  SELECT 1 FROM relevant_research_sources AS relevant
+                  WHERE relevant.dataset = issue.dataset
+                    AND relevant.source_file_id = issue.source_file_id
+              )
+          )
+        GROUP BY issue.dataset, issue.code ORDER BY issue.dataset, issue.code
         """,
-        list(required),
+        [start_date, end_date, start_date, end_date, *required],
     )
     for row in errors.to_dict(orient="records"):
         notes.append(f"{row['dataset']}: {row['code']} ({row['count']} rows/files)")

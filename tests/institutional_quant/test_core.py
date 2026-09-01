@@ -17,7 +17,13 @@ from institutional_quant.factors import FactorEngine, _combine_factor_families
 from institutional_quant.ingestion import CapitalIQImporter, certify_point_in_time
 from institutional_quant.ml import WalkForwardModel
 from institutional_quant.portfolio import PortfolioOptimizer
-from institutional_quant.schemas import BacktestResult, BacktestSpec, DatasetKind, StrategyMetrics
+from institutional_quant.schemas import (
+    BacktestResult,
+    BacktestSpec,
+    DatasetKind,
+    Severity,
+    StrategyMetrics,
+)
 from institutional_quant.storage import DuckDBStore
 
 
@@ -687,6 +693,130 @@ def test_ciq_multi_as_of_fundamentals_pair_period_and_filing_date(tmp_path) -> N
     assert imported["value"].tolist() == pytest.approx([100.0, 110.0])
 
 
+def test_ciq_historical_ltm_multiples_use_their_own_as_of_date(tmp_path) -> None:
+    from openpyxl import Workbook
+
+    source = tmp_path / "historical_ltm_multiples.xlsx"
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.append(["=SPGTable(1)", None, None, None, None, None])
+    sheet.append(
+        [
+            '=SPGLabel(1,267961,"")',
+            '=SPGLabel(1,331277,"")',
+            '=SPGLabel(1,371494,"LTM","08/31/2021")',
+            '=SPGLabel(1,371494,"LTM","09/30/2021")',
+            '=SPGLabel(1,371495,"LTM","08/31/2021")',
+            '=SPGLabel(1,371495,"LTM","09/30/2021")',
+        ]
+    )
+    sheet.append([None] * 6)
+    sheet.append([None] * 6)
+    sheet.append(
+        [
+            "SP_ENTITY_ID",
+            "SP_EXCHANGE_TICKER",
+            "IQ_PE",
+            "IQ_PE",
+            "IQ_TEV_EBITDA",
+            "IQ_TEV_EBITDA",
+        ]
+    )
+    sheet.append([None, None, "LTM", "LTM", "LTM", "LTM"])
+    sheet.append([123456, "NYSE:EXM", 20.0, 21.0, 12.0, 13.0])
+    workbook.save(source)
+
+    store = DuckDBStore(tmp_path / "historical-ltm-multiples.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.FUNDAMENTALS)
+
+    assert result.imported_rows == 4
+    imported = store.query_df(
+        "SELECT period_end, period_type, effective_at, as_of_date, metric, value "
+        "FROM fundamentals ORDER BY as_of_date, metric"
+    )
+    assert imported["period_end"].tolist() == [
+        pd.Timestamp("2021-08-31"),
+        pd.Timestamp("2021-08-31"),
+        pd.Timestamp("2021-09-30"),
+        pd.Timestamp("2021-09-30"),
+    ]
+    assert imported["period_type"].tolist() == ["LTM"] * 4
+    assert imported["effective_at"].tolist() == [
+        pd.Timestamp("2021-08-31 23:59:59.999999"),
+        pd.Timestamp("2021-08-31 23:59:59.999999"),
+        pd.Timestamp("2021-09-30 23:59:59.999999"),
+        pd.Timestamp("2021-09-30 23:59:59.999999"),
+    ]
+    assert imported["metric"].tolist() == [
+        "price_to_earnings",
+        "tev_ebitda",
+        "price_to_earnings",
+        "tev_ebitda",
+    ]
+    assert imported["value"].tolist() == pytest.approx([20.0, 12.0, 21.0, 13.0])
+
+
+def test_empty_ciq_observation_without_period_companions_is_warning(tmp_path) -> None:
+    source = tmp_path / "empty-observation.csv"
+    pd.DataFrame(
+        [
+            {
+                "company_id": "C1",
+                "ticker": "ONE",
+                "period_end": None,
+                "period_type": "FY",
+                "effective_at": None,
+                "as_of_date": "2021-09-30",
+                "metric": "revenue",
+                "value": None,
+            }
+        ]
+    ).to_csv(source, index=False)
+    store = DuckDBStore(tmp_path / "empty-observation.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.FUNDAMENTALS)
+
+    assert result.imported_rows == 0
+    assert result.rejected_rows == 1
+    assert len(result.issues) == 1
+    assert result.issues[0].severity is Severity.WARNING
+    assert "no numeric observation" in result.issues[0].message
+
+
+def test_numeric_ciq_observation_without_availability_is_error(tmp_path) -> None:
+    source = tmp_path / "missing-availability.csv"
+    pd.DataFrame(
+        [
+            {
+                "company_id": "C1",
+                "ticker": "ONE",
+                "period_end": "2020-12-31",
+                "period_type": "FY",
+                "effective_at": None,
+                "as_of_date": "2021-09-30",
+                "metric": "revenue",
+                "value": 100.0,
+            }
+        ]
+    ).to_csv(source, index=False)
+    store = DuckDBStore(tmp_path / "missing-availability.duckdb")
+    store.initialize()
+    settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
+
+    result = CapitalIQImporter(store, settings).import_file(source, DatasetKind.FUNDAMENTALS)
+
+    assert result.imported_rows == 0
+    assert result.rejected_rows == 1
+    assert len(result.issues) == 1
+    assert result.issues[0].severity is Severity.ERROR
+    assert "invalid required identity/time values" in result.issues[0].message
+
+
 def test_mixed_ciq_period_codes_are_applied_per_metric() -> None:
     frame = pd.DataFrame(
         [
@@ -878,6 +1008,74 @@ def test_revision_breadth_uses_analyst_coverage_and_is_bounded() -> None:
 
     assert derived["eps_revision_1m"].tolist() == pytest.approx([0.4, 1.0, -0.5])
     assert derived["eps_revision_3m"].tolist() == pytest.approx([0.7, -1.0, -0.5])
+
+
+def test_point_in_time_estimate_changes_hold_the_fiscal_target_constant() -> None:
+    from institutional_quant.calculations import derive_point_in_time_estimate_changes
+
+    history = pd.DataFrame(
+        [
+            {
+                "company_id": "A",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-01-31",
+                "effective_at": "2024-01-31 23:59:59",
+                "value": 4.0,
+            },
+            {
+                "company_id": "A",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-03-31",
+                "effective_at": "2024-03-31 23:59:59",
+                "value": 4.84,
+            },
+            {
+                "company_id": "A",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-04-30",
+                "effective_at": "2024-04-30 23:59:59",
+                "value": 5.324,
+            },
+            {
+                "company_id": "B",
+                "fiscal_period": "2024-12-31",
+                "as_of_date": "2024-01-31",
+                "effective_at": "2024-01-31 23:59:59",
+                "value": 3.0,
+            },
+            {
+                "company_id": "B",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-04-30",
+                "effective_at": "2024-04-30 23:59:59",
+                "value": 3.5,
+            },
+            {
+                "company_id": "C",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-03-31",
+                "effective_at": "2024-03-31 23:59:59",
+                "value": -2.0,
+            },
+            {
+                "company_id": "C",
+                "fiscal_period": "2025-12-31",
+                "as_of_date": "2024-04-30",
+                "effective_at": "2024-04-30 23:59:59",
+                "value": -1.0,
+            },
+        ]
+    )
+
+    changes = derive_point_in_time_estimate_changes(history, date(2024, 4, 30)).set_index(
+        "company_id"
+    )
+
+    assert changes.loc["A", "eps_revision_1m"] == pytest.approx(0.1)
+    assert changes.loc["A", "eps_revision_3m"] == pytest.approx(0.331)
+    assert pd.isna(changes.loc["B", "eps_revision_1m"])
+    assert pd.isna(changes.loc["B", "eps_revision_3m"])
+    assert changes.loc["C", "eps_revision_1m"] == pytest.approx(0.5)
 
 
 def test_ciq_keyfield_headers_are_normalized() -> None:
@@ -1125,12 +1323,30 @@ def test_certification_rejects_current_only_fundamentals_and_estimates() -> None
                         "last": [pd.Timestamp("2026-08-28")],
                     }
                 )
-            if "SELECT DISTINCT effective_at FROM estimates" in sql:
-                assert parameters == [
-                    datetime(2021, 9, 1),
-                    datetime(2026, 9, 1),
-                ]
-                return pd.DataFrame({"effective_at": [datetime(2026, 8, 31, 23, 59)]})
+            if "FROM fundamentals" in sql and "SELECT DISTINCT as_of_date" in sql:
+                assert parameters == [date(2021, 9, 1), date(2026, 8, 31)]
+                return pd.DataFrame(
+                    {
+                        "snapshot_date": [date(2026, 8, 31)] * 500,
+                        "company_id": [str(value) for value in range(500)],
+                    }
+                )
+            if "FROM estimates" in sql and "SELECT DISTINCT as_of_date" in sql:
+                assert parameters == [date(2021, 9, 1), date(2026, 8, 31)]
+                return pd.DataFrame(
+                    {
+                        "snapshot_date": [date(2026, 8, 31)] * 500,
+                        "company_id": [str(value) for value in range(500)],
+                    }
+                )
+            if "SELECT company_id, member_from, member_to" in sql:
+                return pd.DataFrame(
+                    {
+                        "company_id": [str(value) for value in range(500)],
+                        "member_from": [date(2021, 9, 1)] * 500,
+                        "member_to": [pd.NaT] * 500,
+                    }
+                )
             if "MIN(member_from)" in sql:
                 return pd.DataFrame(
                     {
@@ -1155,7 +1371,8 @@ def test_certification_rejects_current_only_fundamentals_and_estimates() -> None
 
     assert not certified
     assert "Point-in-time fundamentals begin after the requested backtest start" in notes
-    assert any("estimates are missing 59 monthly signal snapshot" in note for note in notes)
+    assert any("fundamentals cover fewer than 90%" in note for note in notes)
+    assert any("EPS estimates cover fewer than 90%" in note for note in notes)
 
 
 def test_cost_sensitivity_reuses_frozen_turnover() -> None:

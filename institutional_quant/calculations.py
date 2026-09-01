@@ -59,8 +59,74 @@ def derive_estimate_revision_features(frame: pd.DataFrame) -> pd.DataFrame:
         ).max(axis=1, skipna=True)
         denominator = denominator.where(denominator > 0)
         breadth = _safe_divide(upward - downward, denominator).clip(-1.0, 1.0)
-        output[f"eps_revision_{window}"] = breadth
+        column = f"eps_revision_{window}"
+        if column in output:
+            output[column] = pd.to_numeric(output[column], errors="coerce").fillna(breadth)
+        else:
+            output[column] = breadth
     return output
+
+
+def derive_point_in_time_estimate_changes(
+    history: pd.DataFrame, as_of_date: object
+) -> pd.DataFrame:
+    """Derive 1m/3m EPS consensus changes without mixing fiscal targets.
+
+    The latest consensus available at the signal date is compared with the
+    latest observation on or before each historical cutoff for the exact same
+    company and fiscal period.  Dividing by the absolute prior estimate keeps
+    an improvement from a negative EPS estimate directionally positive.
+    """
+    output_columns = ["company_id", "eps_revision_1m", "eps_revision_3m"]
+    required = {"company_id", "fiscal_period", "as_of_date", "effective_at", "value"}
+    if history.empty or not required.issubset(history.columns):
+        return pd.DataFrame(columns=output_columns)
+
+    working = history.copy()
+    working = working.loc[working["company_id"].notna()].copy()
+    working["company_id"] = working["company_id"].astype(str)
+    working["fiscal_period"] = pd.to_datetime(working["fiscal_period"], errors="coerce")
+    working["as_of_date"] = pd.to_datetime(working["as_of_date"], errors="coerce")
+    working["effective_at"] = pd.to_datetime(working["effective_at"], errors="coerce")
+    working["value"] = pd.to_numeric(working["value"], errors="coerce")
+    signal_date = pd.Timestamp(as_of_date).normalize()
+    working = working.loc[
+        working["company_id"].notna()
+        & working["fiscal_period"].notna()
+        & working["as_of_date"].notna()
+        & working["effective_at"].notna()
+        & working["value"].notna()
+        & (working["as_of_date"] <= signal_date)
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    order = ["company_id", "as_of_date", "effective_at"]
+    if "ingested_at" in working.columns:
+        working["ingested_at"] = pd.to_datetime(working["ingested_at"], errors="coerce")
+        order.append("ingested_at")
+    working = working.sort_values(order).drop_duplicates(
+        ["company_id", "fiscal_period", "as_of_date"], keep="last"
+    )
+
+    rows: list[dict[str, float | str]] = []
+    for company_id, company_history in working.groupby("company_id", sort=False):
+        current = company_history.iloc[-1]
+        same_target = company_history.loc[
+            company_history["fiscal_period"] == current["fiscal_period"]
+        ]
+        row: dict[str, float | str] = {"company_id": str(company_id)}
+        for months in (1, 3):
+            cutoff = (signal_date.to_period("M") - months).end_time.normalize()
+            prior = same_target.loc[same_target["as_of_date"] <= cutoff]
+            revision = np.nan
+            if not prior.empty:
+                prior_value = float(prior.iloc[-1]["value"])
+                if abs(prior_value) > 1e-12:
+                    revision = (float(current["value"]) - prior_value) / abs(prior_value)
+            row[f"eps_revision_{months}m"] = revision
+        rows.append(row)
+    return pd.DataFrame(rows, columns=output_columns)
 
 
 def derive_fundamental_features(frame: pd.DataFrame) -> pd.DataFrame:
