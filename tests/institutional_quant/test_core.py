@@ -6,7 +6,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from institutional_quant.backtest import apply_transaction_cost, derive_cost_sensitivity
+from institutional_quant.backtest import (
+    BacktestEngine,
+    apply_transaction_cost,
+    derive_cost_sensitivity,
+)
 from institutional_quant.calculations import derive_fundamental_features
 from institutional_quant.config import Settings
 from institutional_quant.factors import FactorEngine, _combine_factor_families
@@ -175,6 +179,58 @@ def test_walk_forward_rejects_same_month_training() -> None:
     current = pd.DataFrame({"as_of_date": [date(2024, 1, 31)], "x": [2.0], "factor_score": [0.0]})
     with pytest.raises(ValueError, match="strictly precede"):
         WalkForwardModel().predict(history, current, ["x"])
+
+
+def test_backtest_returns_remain_continuous_across_ticker_change(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "rename.duckdb")
+    store.initialize()
+    engine = BacktestEngine(store)
+    prices = pd.DataFrame(
+        [
+            {
+                "company_id": "C1",
+                "ticker": "OLD",
+                "price_date": date(2025, 1, 2),
+                "open": 100.0,
+                "adjusted_close": 100.0,
+            },
+            {
+                "company_id": "C1",
+                "ticker": "NEW",
+                "price_date": date(2025, 2, 3),
+                "open": 110.0,
+                "adjusted_close": 110.0,
+            },
+            {
+                "company_id": "BENCHMARK:SPY",
+                "ticker": "SPY",
+                "price_date": date(2025, 1, 2),
+                "open": 100.0,
+                "adjusted_close": 100.0,
+            },
+            {
+                "company_id": "BENCHMARK:SPY",
+                "ticker": "SPY",
+                "price_date": date(2025, 2, 3),
+                "open": 105.0,
+                "adjusted_close": 105.0,
+            },
+        ]
+    )
+    forward = engine._forward_returns(
+        prices,
+        [date(2025, 1, 1), date(2025, 1, 31), date(2025, 2, 28)],
+        "SPY",
+    )[date(2025, 1, 1)]
+    assert forward.loc[forward["company_id"] == "C1", "next_return"].item() == pytest.approx(0.10)
+
+    history = engine._returns_history(
+        prices,
+        date(2025, 2, 3),
+        pd.DataFrame({"company_id": ["C1"], "ticker": ["NEW"]}),
+    )
+    assert list(history.columns) == ["NEW"]
+    assert history["NEW"].dropna().iloc[-1] == pytest.approx(0.10)
 
 
 def test_optimizer_constraints_and_transaction_cost() -> None:

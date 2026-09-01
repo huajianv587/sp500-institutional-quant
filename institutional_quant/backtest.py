@@ -209,14 +209,12 @@ class BacktestEngine:
             entry_frame = prices.loc[
                 pd.to_datetime(prices["price_date"]).dt.date == entry,
                 ["company_id", "ticker", "open"],
-            ]
+            ].rename(columns={"open": "open_entry"})
             exit_frame = prices.loc[
                 pd.to_datetime(prices["price_date"]).dt.date == exit_date,
-                ["company_id", "ticker", "open"],
-            ]
-            merged = entry_frame.merge(
-                exit_frame, on=["company_id", "ticker"], suffixes=("_entry", "_exit")
-            )
+                ["company_id", "open"],
+            ].rename(columns={"open": "open_exit"})
+            merged = entry_frame.merge(exit_frame, on="company_id")
             merged["next_return"] = merged["open_exit"] / merged["open_entry"] - 1
             benchmark_rows = merged.loc[merged["ticker"] == benchmark, "next_return"]
             benchmark_return = float(benchmark_rows.iloc[0]) if not benchmark_rows.empty else np.nan
@@ -227,13 +225,21 @@ class BacktestEngine:
         return output
 
     def _returns_history(
-        self, prices: pd.DataFrame, signal: date, tickers: list[str]
+        self, prices: pd.DataFrame, signal: date, universe: pd.DataFrame
     ) -> pd.DataFrame:
-        cutoff = prices.loc[pd.to_datetime(prices["price_date"]).dt.date <= signal].copy()
-        cutoff = cutoff.loc[cutoff["ticker"].isin(tickers)]
-        pivot = cutoff.pivot_table(
-            index="price_date", columns="ticker", values="adjusted_close", aggfunc="last"
+        identity = universe[["company_id", "ticker"]].drop_duplicates("company_id")
+        company_ids = set(identity["company_id"].astype(str))
+        ticker_by_company = dict(
+            zip(identity["company_id"].astype(str), identity["ticker"].astype(str), strict=True)
         )
+        cutoff = prices.loc[pd.to_datetime(prices["price_date"]).dt.date <= signal].copy()
+        cutoff = cutoff.loc[cutoff["company_id"].astype(str).isin(company_ids)]
+        pivot = cutoff.pivot_table(
+            index="price_date", columns="company_id", values="adjusted_close", aggfunc="last"
+        )
+        pivot.columns = [
+            ticker_by_company.get(str(column), str(column)) for column in pivot.columns
+        ]
         return pivot.sort_index().pct_change().tail(252)
 
     def run(self, spec: BacktestSpec) -> BacktestResult:
@@ -387,7 +393,7 @@ class BacktestEngine:
             sector_weights = universe["sector"].value_counts(normalize=True).to_dict()
             for name, column in strategy_columns.items():
                 returns_history = self._returns_history(
-                    prices, month.signal_date, universe["ticker"].tolist()
+                    prices, month.signal_date, universe[["company_id", "ticker"]]
                 )
                 recommendation = self.optimizer.optimize(
                     universe,
