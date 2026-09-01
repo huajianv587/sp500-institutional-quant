@@ -110,3 +110,62 @@ def test_membership_intervals_preserve_viac_para_company_identity(tmp_path):
             "member_to": None,
         },
     ]
+
+
+def test_membership_refresh_rekeys_public_identity_after_ciq_import(tmp_path, monkeypatch):
+    store = DuckDBStore(tmp_path / "refresh.duckdb")
+    store.initialize()
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "refresh.duckdb",
+        raw_data_dir=tmp_path / "raw",
+    )
+    sync = PublicSP500MembershipSync(store, settings)
+    tickers = {f"T{value:03d}" for value in range(500)}
+    current_csv = ("ticker\n" + "\n".join(sorted(tickers)) + "\n").encode()
+    files = dict.fromkeys(sync.upstream_files, b"fixture")
+    files["pitindex/data/sp500_current.csv"] = current_csv
+    monkeypatch.setattr(sync, "_download_bundle", lambda end: (b"fixed-bundle", files))
+    monkeypatch.setattr(
+        sync,
+        "_events",
+        lambda files, end: (date(2021, 9, 1), tickers, []),
+    )
+
+    first = sync.sync(start=date(2021, 9, 1), end=date(2021, 9, 30))
+    assert first.imported_rows == 500
+    before = store.query_df("SELECT company_id FROM index_membership WHERE ticker = 'T000'").iloc[
+        0
+    ]["company_id"]
+    assert before == "PUBLICSP500:T000"
+
+    store.insert_frame(
+        "instruments",
+        pd.DataFrame(
+            [
+                {
+                    "company_id": "CIQ:0",
+                    "ticker": "T000",
+                    "company_name": "Example",
+                    "sector": "Industrials",
+                    "currency": "USD",
+                    "effective_at": datetime(2026, 9, 1),
+                    "as_of_date": date(2026, 9, 1),
+                    "source_file_id": "ciq-fixture",
+                    "ingested_at": datetime(2026, 9, 1),
+                }
+            ]
+        ),
+    )
+    refreshed = sync.sync(
+        start=date(2021, 9, 1),
+        end=date(2021, 9, 30),
+        refresh_identity_map=True,
+    )
+
+    assert not refreshed.idempotent
+    after = store.query_df("SELECT company_id FROM index_membership WHERE ticker = 'T000'").iloc[0][
+        "company_id"
+    ]
+    assert after == "CIQ:0"
+    assert store.query_df("SELECT COUNT(*) AS count FROM source_files").iloc[0]["count"] == 1

@@ -307,6 +307,7 @@ class PublicSP500MembershipSync:
         start: date = date(2021, 9, 1),
         end: date = date(2026, 8, 31),
         sync_date: date | None = None,
+        refresh_identity_map: bool = False,
     ) -> ImportResult:
         if end < start:
             raise ValueError("end must be on or after start")
@@ -317,7 +318,7 @@ class PublicSP500MembershipSync:
         bundle, files = self._download_bundle(end)
         digest = hashlib.sha256(bundle).hexdigest()
         existing = self.store.source_by_hash(digest)
-        if existing:
+        if existing and not refresh_identity_map:
             return ImportResult(
                 source_file_id=str(existing["source_file_id"]),
                 dataset=DatasetKind.INDEX_MEMBERSHIP,
@@ -355,7 +356,7 @@ class PublicSP500MembershipSync:
             )
 
         observed_as_of = sync_date or datetime.now(timezone.utc).date()
-        source_file_id = f"src_{digest[:24]}"
+        source_file_id = str(existing["source_file_id"]) if existing else f"src_{digest[:24]}"
         raw_dir = self.settings.raw_data_dir / "index_membership_public"
         raw_dir.mkdir(parents=True, exist_ok=True)
         archived = raw_dir / (
@@ -440,6 +441,7 @@ class PublicSP500MembershipSync:
                     }
                 ),
                 "superseded_public_source_ids": sorted(superseded),
+                "identity_map_refreshed": refresh_identity_map,
             },
         )
         issue = DataQualityIssue(

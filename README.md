@@ -24,12 +24,17 @@ field is deliberately stored as null instead of being fabricated. This is a
 connectivity and control result, not a model benchmark or investment result.
 
 The repository remains in the **historical data-completion phase**, not the final
-investment-result phase. A current Capital IQ snapshot cannot certify a five-year
-point-in-time study. The final case study and GitHub release remain gated on
-historical fundamentals, monthly estimate snapshots, the model benchmark and the
-24-month debate ablation. The 2017–2026 adjusted-price warm-up and study window is
-populated and quality checked, but remains an explicitly labelled Yahoo/Alpaca
-substitute until a licensed Capital IQ price export is available.
+investment-result phase. Twenty-one quarterly Capital IQ fundamental snapshots
+and 60 monthly FY+1 EPS snapshots now cover the study dates, but their source
+screen used the current S&P 500 roster. The strengthened certification gate
+therefore rejects the study: historical-universe overlap is below 90% in nine
+quarters and 30 months. `sp500iq ciq-gap-manifest` identifies 103 historical
+constituent tickers requiring one additional Capital IQ entity-pool export. The
+final case study and GitHub release remain gated on that coverage repair, the
+model benchmark and the 24-month debate ablation. The 2017–2026 adjusted-price
+warm-up and study window is populated and quality checked, but remains an
+explicitly labelled Yahoo/Alpaca substitute until a licensed Capital IQ price
+export is available.
 
 ## Architecture
 
@@ -199,6 +204,17 @@ Capital IQ export contracts are documented in [`docs/CIQ_EXPORT_TEMPLATES.md`](d
 
 ```bash
 uv run sp500iq import-ciq fundamentals /absolute/path/fundamentals.xlsx
+```
+
+Before certifying a historical study, generate the exact constituent gap list.
+After importing the missing Capital IQ entities, rebuild the public membership
+intervals so deterministic `PUBLICSP500:*` placeholders are replaced by Capital
+IQ company IDs:
+
+```bash
+uv run sp500iq ciq-gap-manifest
+uv run sp500iq sync-public-sp500-membership \
+  --start 2021-09-01 --end 2026-08-31 --refresh-identities
 ```
 
 For a live-only Capital IQ snapshot, supply the actual download timestamp

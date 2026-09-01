@@ -418,13 +418,9 @@ class DuckDBStore:
                 )
                 """
             )
-            connection.execute(
-                "INSERT INTO fundamentals__snapshot_key SELECT * FROM fundamentals"
-            )
+            connection.execute("INSERT INTO fundamentals__snapshot_key SELECT * FROM fundamentals")
             connection.execute("DROP TABLE fundamentals")
-            connection.execute(
-                "ALTER TABLE fundamentals__snapshot_key RENAME TO fundamentals"
-            )
+            connection.execute("ALTER TABLE fundamentals__snapshot_key RENAME TO fundamentals")
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
@@ -533,6 +529,11 @@ class DuckDBStore:
         self.execute(
             """
             INSERT INTO source_files VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (source_file_id) DO UPDATE SET
+              dataset=EXCLUDED.dataset, original_name=EXCLUDED.original_name,
+              archived_path=EXCLUDED.archived_path, sha256=EXCLUDED.sha256,
+              row_count=EXCLUDED.row_count, imported_at=EXCLUDED.imported_at,
+              metadata_json=EXCLUDED.metadata_json
             """,
             [
                 source_file_id,

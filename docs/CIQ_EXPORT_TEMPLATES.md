@@ -164,3 +164,42 @@ The verified estimate template uses the following self-contained fields as of `2
 The importer reads `FY+1`, `FY0` and the as-of date from the workbook's `SPGLabel` formulas. It deterministically derives each target `fiscal_period` by shifting the companion FY0 Period Ended date by one year. The date-only estimate snapshot is conservatively available at `23:59:59.999999` on the as-of date. The source manifest records the relative period code and derivation policy.
 
 The 500-company validation produced 476 usable estimate observations. Capital IQ returned no numeric EPS value for 24 companies; those rows were recorded as `NULL_REQUIRED_VALUE` and rejected rather than imputed. Historical monthly estimate exports must repeat this same self-contained template at each signal cutoff.
+
+### Historical study exports and constituent-coverage repair
+
+The verified study files now contain:
+
+- 21 quarterly point-in-time fundamental snapshots from `2021-09-30` through
+  `2026-08-31`, split across the core-quality and institutional-multiple files;
+- five prior-trading-day valuation snapshots for quarter ends that fell on a
+  non-trading day;
+- 60 monthly normalized EPS FY+1 snapshots from `2021-09-30` through
+  `2026-08-31`.
+
+The formulas, availability timestamps and date coverage pass ingestion. The
+screen universe, however, was the current S&P 500 roster. A historical study
+must also prove that each snapshot covers the companies that were constituents
+on that date. Certification now requires both at least 400 names and at least
+90% overlap with the reconstructed point-in-time universe. The first snapshots
+cover only about 82%–83%, so they are intentionally not certified.
+
+Generate the exact repair universe with:
+
+```bash
+uv run sp500iq ciq-gap-manifest
+```
+
+The resulting ignored CSV currently contains 103 historical tickers. Use that
+list as a separate Capital IQ entity pool and repeat the same fundamental and
+estimate columns; retain Entity ID, Exchange:Ticker and Sector in the repair
+exports. After importing the new instruments and observations, rebuild the
+public intervals so placeholder identifiers are reconciled to Capital IQ IDs:
+
+```bash
+uv run sp500iq sync-public-sp500-membership \
+  --start 2021-09-01 --end 2026-08-31 --refresh-identities
+```
+
+Re-running a market-data sync then writes the same adjusted observations under
+the reconciled company IDs. The original labelled source archives remain
+immutable; no licensed workbook or generated gap manifest is committed.

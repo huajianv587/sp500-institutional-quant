@@ -46,10 +46,11 @@ uv run sp500iq factor-snapshot --as-of 2026-09-01 --top 25
 ```
 
 The verified current snapshot has all six factor families, with 489 companies
-covered by revisions. The same command at `2026-08-31` returns zero investable
-companies, which is the expected proof that the 2026-09-01 Capital IQ snapshots
-cannot leak backward. The displayed leaders are research candidates, not an
-automatic investment list.
+covered by revisions. Historical files have since been imported, so a
+`2026-08-31` factor snapshot is no longer expected to be empty. The availability
+gate instead proves that the later `2026-09-01` current snapshot cannot leak
+backward. Displayed leaders are research candidates, not an automatic
+investment list.
 
 The verified live Agent smoke uses one immutable EvidencePacket and the full
 nine-node graph. `deepseek-v4-pro` completed four independent analysts, two
@@ -131,6 +132,32 @@ data/exports/ciq/estimates_FY1_asof_2026-08-31.xlsx
 A missing numeric estimate for an individual company is acceptable as missing
 data and is never imputed. A missing monthly snapshot is not acceptable for the
 certified study.
+
+### C.1 Historical-universe coverage repair
+
+Date coverage alone is insufficient. The existing 21-quarter fundamental and
+60-month EPS files were exported from a current-constituent screen; early study
+snapshots therefore omit companies that later left the index. Produce the exact
+repair list with:
+
+```bash
+uv run sp500iq ciq-gap-manifest
+```
+
+The current manifest contains 103 historical tickers: 98 need fundamentals,
+103 need EPS estimates and 100 need a Capital IQ instrument identity. Create a
+separate Capital IQ entity pool for those tickers and repeat the same historical
+columns. After importing the repair files, reconcile the public membership
+intervals to the newly observed Capital IQ IDs:
+
+```bash
+uv run sp500iq sync-public-sp500-membership \
+  --start 2021-09-01 --end 2026-08-31 --refresh-identities
+```
+
+Certification requires every quarterly/monthly snapshot to cover at least 400
+companies and at least 90% of the actual historical universe. Until that gate
+passes, neither `case-study` nor a five-year performance claim is allowed.
 
 ### D. Membership and prices
 

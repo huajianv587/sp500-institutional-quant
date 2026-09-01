@@ -16,7 +16,7 @@ from .config import Settings
 from .demo import build_synthetic_demo
 from .factors import FactorEngine
 from .index_data import PublicSP500MembershipSync
-from .ingestion import CapitalIQImporter
+from .ingestion import CapitalIQImporter, historical_universe_gaps
 from .market_data import AlpacaHistoricalPriceSync, YahooHistoricalPriceSync
 from .preflight import run_preflight
 from .reports import write_backtest_report
@@ -208,6 +208,13 @@ def sync_yahoo_prices(
 def sync_public_sp500_membership(
     start: str = "2021-09-01",
     end: str = "2026-08-31",
+    refresh_identities: Annotated[
+        bool,
+        typer.Option(
+            "--refresh-identities",
+            help="Rebuild public intervals after importing new Capital IQ company IDs",
+        ),
+    ] = False,
 ) -> None:
     """Load a pinned, explicitly non-CIQ point-in-time S&P 500 reconstruction."""
     load_dotenv()
@@ -217,8 +224,46 @@ def sync_public_sp500_membership(
     result = PublicSP500MembershipSync(store, settings).sync(
         start=date.fromisoformat(start),
         end=date.fromisoformat(end),
+        refresh_identity_map=refresh_identities,
     )
     typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("ciq-gap-manifest")
+def ciq_gap_manifest(
+    start: str = "2021-09-01",
+    end: str = "2026-08-31",
+    output: Path = Path("data/exports/ciq/historical_universe_gap_manifest.csv"),
+) -> None:
+    """Export historical constituents that still need Capital IQ coverage."""
+    load_dotenv()
+    settings = Settings.from_env()
+    store = create_store(settings)
+    store.initialize()
+    gaps = historical_universe_gaps(
+        store,
+        date.fromisoformat(start),
+        date.fromisoformat(end),
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
+    gaps.to_csv(output, index=False)
+    typer.echo(
+        json.dumps(
+            {
+                "output": str(output.resolve()),
+                "rows": len(gaps),
+                "unique_tickers": int(gaps["ticker"].nunique()) if not gaps.empty else 0,
+                "needs_fundamentals": int(gaps["needs_fundamentals"].sum())
+                if not gaps.empty
+                else 0,
+                "needs_estimates": int(gaps["needs_estimates"].sum()) if not gaps.empty else 0,
+                "needs_instrument_identity": int(gaps["needs_instrument_identity"].sum())
+                if not gaps.empty
+                else 0,
+            },
+            indent=2,
+        )
+    )
 
 
 @app.command("backtest-demo")

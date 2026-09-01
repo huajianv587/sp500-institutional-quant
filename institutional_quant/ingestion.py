@@ -1251,6 +1251,51 @@ class CapitalIQImporter:
         )
 
 
+def historical_universe_gaps(store: Store, start_date, end_date) -> pd.DataFrame:
+    """List historical constituent identities still missing institutional data."""
+    return store.query_df(
+        """
+        WITH historical AS (
+            SELECT company_id, ticker,
+                   MIN(member_from) AS first_member,
+                   MAX(COALESCE(member_to, ?)) AS last_member
+            FROM index_membership
+            WHERE index_code = 'SP500'
+              AND member_from <= ?
+              AND (member_to IS NULL OR member_to >= ?)
+            GROUP BY company_id, ticker
+        ), fundamental_ids AS (
+            SELECT DISTINCT company_id FROM fundamentals
+            WHERE as_of_date BETWEEN ? AND ?
+        ), estimate_ids AS (
+            SELECT DISTINCT company_id FROM estimates
+            WHERE metric = 'eps_estimate' AND as_of_date BETWEEN ? AND ?
+        ), instrument_ids AS (
+            SELECT DISTINCT company_id FROM instruments
+        )
+        SELECT h.company_id, h.ticker, h.first_member, h.last_member,
+               (f.company_id IS NULL) AS needs_fundamentals,
+               (e.company_id IS NULL) AS needs_estimates,
+               (i.company_id IS NULL) AS needs_instrument_identity
+        FROM historical AS h
+        LEFT JOIN fundamental_ids AS f ON f.company_id = h.company_id
+        LEFT JOIN estimate_ids AS e ON e.company_id = h.company_id
+        LEFT JOIN instrument_ids AS i ON i.company_id = h.company_id
+        WHERE f.company_id IS NULL OR e.company_id IS NULL OR i.company_id IS NULL
+        ORDER BY h.ticker, h.first_member
+        """,
+        [
+            end_date,
+            end_date,
+            start_date,
+            start_date,
+            end_date,
+            start_date,
+            end_date,
+        ],
+    )
+
+
 def certify_point_in_time(
     store: Store, start_date, end_date, required: Iterable[str] | None = None
 ) -> tuple[bool, list[str]]:
