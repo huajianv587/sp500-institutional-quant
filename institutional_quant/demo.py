@@ -29,6 +29,13 @@ SECTORS = [
 
 def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore:
     """Generate licensed-data-free fixtures for engineering verification only."""
+    # The demo is an acceptance fixture, not a durable research database.  Rebuild
+    # it on every invocation so the documented two-command smoke test is
+    # repeatable after schema or fixture changes.
+    for suffix in ("", ".wal"):
+        candidate = Path(f"{database_path}{suffix}")
+        if candidate.exists():
+            candidate.unlink()
     settings = Settings(
         database_backend="duckdb",
         database_path=database_path,
@@ -140,6 +147,14 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                 "net_debt": revenue * (0.2 + index % 4 * 0.12),
             }
             effective = (period + pd.Timedelta(days=42)).date()
+            # Capital IQ historical exports are frozen research snapshots.  Keep
+            # the filing availability timestamp separate from the observation
+            # cut-off used by the strategy.  The final partial quarter is frozen
+            # at the study end rather than silently disappearing from coverage.
+            snapshot = min(
+                (pd.Timestamp(effective) + pd.offsets.QuarterEnd(0)).date(),
+                date(2026, 8, 31),
+            )
             for metric, value in values.items():
                 if value is not None:
                     fundamental_rows.append(
@@ -149,7 +164,7 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
                             "period_end": period.date(),
                             "period_type": "Quarterly",
                             "effective_at": f"{effective}T12:00:00Z",
-                            "as_of_date": effective,
+                            "as_of_date": snapshot,
                             "metric": metric,
                             "value": value,
                             "unit": "USD",
@@ -164,6 +179,8 @@ def build_synthetic_demo(database_path: Path, raw_data_dir: Path) -> DuckDBStore
             up_3m = int(np.clip(rng.poisson(12 + max(directional_bias, 0)), 0, 50))
             down_3m = int(np.clip(rng.poisson(12 + max(-directional_bias, 0)), 0, 50))
             for metric, value in {
+                "eps_estimate": (1.2 + 0.04 * index)
+                * (1 + (0.018 + index % 5 * 0.002) * (len(periods) + month.year - 2026)),
                 "eps_analyst_count_1m": analyst_count,
                 "eps_up_revisions_1m": up_1m,
                 "eps_down_revisions_1m": down_1m,

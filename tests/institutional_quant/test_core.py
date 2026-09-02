@@ -13,6 +13,7 @@ from institutional_quant.backtest import (
 )
 from institutional_quant.calculations import derive_fundamental_features
 from institutional_quant.config import Settings
+from institutional_quant.demo import build_synthetic_demo
 from institutional_quant.factors import FactorEngine, _combine_factor_families
 from institutional_quant.ingestion import CapitalIQImporter, certify_point_in_time
 from institutional_quant.ml import WalkForwardModel
@@ -1295,6 +1296,26 @@ def test_certification_parameterizes_synthetic_source_pattern() -> None:
 
     assert not certified
     assert "No historical S&P 500 membership coverage" in notes
+
+
+def test_synthetic_demo_satisfies_small_universe_point_in_time_gate(tmp_path) -> None:
+    database = tmp_path / "demo.duckdb"
+    store = build_synthetic_demo(database, tmp_path / "raw")
+
+    certified, notes = certify_point_in_time(
+        store,
+        date(2021, 9, 1),
+        date(2026, 8, 31),
+    )
+
+    assert certified
+    assert any("SYNTHETIC DATA ONLY" in note for note in notes)
+    assert any("checks passed" in note for note in notes)
+
+    # Rebuilding the same documented fixture path is deterministic and does not
+    # accumulate stale source registrations.
+    rebuilt = build_synthetic_demo(database, tmp_path / "raw")
+    assert len(rebuilt.source_status()) == 5
 
 
 def test_certification_rejects_current_only_fundamentals_and_estimates() -> None:
