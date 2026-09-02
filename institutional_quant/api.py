@@ -333,11 +333,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "slug": slug,
             "database_backend": settings.database_backend,
             "paper_only": True,
-            "sources": store.source_status(),
-            "issues": store.list_issues(25),
-            "portfolio": store.current_portfolio(),
-            "backtests": store.list_backtests(10),
-            "benchmarks": store.list_model_benchmarks(10),
+            "sources": [],
+            "issues": [],
+            "portfolio": None,
+            "backtests": [],
+            "benchmarks": [],
             "research_runs": [],
             "decisions": [],
             "factors": [],
@@ -346,59 +346,77 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "certification_notes": [],
             "chart": "",
         }
-        runs = store.query_df(
-            "SELECT run_id, as_of_date, created_at FROM research_runs ORDER BY created_at DESC LIMIT 20"
-        )
-        context["research_runs"] = runs.to_dict(orient="records")
-        decisions = store.query_df(
-            "SELECT decision_json FROM consensus_decisions ORDER BY created_at DESC LIMIT 20"
-        )
-        context["decisions"] = [_json_value(value) for value in decisions.get("decision_json", [])]
         if slug == "data-status":
+            context["sources"] = store.source_status()
+            context["issues"] = store.list_issues(25)
             certified, notes = certify_point_in_time(
                 store, date(2021, 9, 1), min(date.today(), date(2026, 8, 31))
             )
             context["certified"] = certified
             context["certification_notes"] = notes
-        available_factor_dates = [
-            value
-            for value in (
-                store.latest_available_date("prices"),
-                store.latest_available_date("fundamentals"),
-                store.latest_available_date("estimates"),
-            )
-            if value is not None
-        ]
-        factor_date = (
-            min(max(available_factor_dates), date.today()) if available_factor_dates else None
-        )
-        if slug == "factor-lab" and factor_date:
-            try:
-                snapshot = FactorEngine(store).snapshot(factor_date)
-                family_columns = [
-                    "factor_value",
-                    "factor_quality",
-                    "factor_growth",
-                    "factor_revisions",
-                    "factor_momentum",
-                    "factor_low_risk",
-                ]
-                context["factor_readiness"] = {
-                    "as_of_date": factor_date,
-                    "companies": len(snapshot),
-                    "investable": int(snapshot["factor_score"].notna().sum()),
-                    "family_coverage": {
-                        column.removeprefix("factor_"): int(snapshot[column].notna().sum())
-                        for column in family_columns
-                    },
-                }
-                factors = snapshot.dropna(subset=["factor_score"]).nlargest(25, "factor_score")
-                context["factors"] = factors[["ticker", "sector", "factor_score"]].to_dict(
-                    orient="records"
+        elif slug == "factor-lab":
+            available_factor_dates = [
+                value
+                for value in (
+                    store.latest_available_date("prices"),
+                    store.latest_available_date("fundamentals"),
+                    store.latest_available_date("estimates"),
                 )
-            except ValueError:
-                pass
-        if context["backtests"]:
+                if value is not None
+            ]
+            factor_date = (
+                min(max(available_factor_dates), date.today())
+                if available_factor_dates
+                else None
+            )
+            if factor_date:
+                try:
+                    snapshot = FactorEngine(store).snapshot(factor_date)
+                    family_columns = [
+                        "factor_value",
+                        "factor_quality",
+                        "factor_growth",
+                        "factor_revisions",
+                        "factor_momentum",
+                        "factor_low_risk",
+                    ]
+                    context["factor_readiness"] = {
+                        "as_of_date": factor_date,
+                        "companies": len(snapshot),
+                        "investable": int(snapshot["factor_score"].notna().sum()),
+                        "family_coverage": {
+                            column.removeprefix("factor_"): int(snapshot[column].notna().sum())
+                            for column in family_columns
+                        },
+                    }
+                    factors = snapshot.dropna(subset=["factor_score"]).nlargest(
+                        25, "factor_score"
+                    )
+                    context["factors"] = factors[
+                        ["ticker", "sector", "factor_score"]
+                    ].to_dict(orient="records")
+                except ValueError:
+                    pass
+        elif slug == "research-runs":
+            runs = store.query_df(
+                "SELECT run_id, as_of_date, created_at FROM research_runs "
+                "ORDER BY created_at DESC LIMIT 20"
+            )
+            context["research_runs"] = runs.to_dict(orient="records")
+            context["benchmarks"] = store.list_model_benchmarks(10)
+        elif slug == "debate":
+            decisions = store.query_df(
+                "SELECT decision_json FROM consensus_decisions "
+                "ORDER BY created_at DESC LIMIT 20"
+            )
+            context["decisions"] = [
+                _json_value(value) for value in decisions.get("decision_json", [])
+            ]
+        elif slug == "portfolio":
+            context["portfolio"] = store.current_portfolio()
+        elif slug == "backtest":
+            context["backtests"] = store.list_backtests(10)
+        if slug == "backtest" and context["backtests"]:
             latest = context["backtests"][0]
             frame = pd.DataFrame(latest.monthly_returns)
             if not frame.empty:
@@ -427,8 +445,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def root(request: Request):
+        context = await asyncio.to_thread(page_context, "data-status")
         return templates.TemplateResponse(
-            request=request, name="page.html", context=page_context("data-status")
+            request=request, name="page.html", context=context
         )
 
     for path, slug in [
@@ -442,8 +461,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     ]:
 
         async def render(request: Request, page_slug: str = slug):
+            context = await asyncio.to_thread(page_context, page_slug)
             return templates.TemplateResponse(
-                request=request, name="page.html", context=page_context(page_slug)
+                request=request, name="page.html", context=context
             )
 
         app.add_api_route(path, render, response_class=HTMLResponse, methods=["GET"], name=slug)

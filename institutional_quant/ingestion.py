@@ -1324,57 +1324,69 @@ def certify_point_in_time(
     if missing:
         notes.append(f"Missing authoritative datasets: {', '.join(missing)}")
 
-    membership_intervals: pd.DataFrame | None = None
-
     def historical_universe_coverage(
-        presence: pd.DataFrame,
+        table: str,
         *,
         frequency: str,
         label: str,
+        metric: str | None = None,
     ) -> list[str]:
-        nonlocal membership_intervals
-        if membership_intervals is None:
-            membership_intervals = store.query_df(
-                """
-                SELECT company_id, member_from, member_to
-                FROM index_membership WHERE index_code = 'SP500'
-                """
-            )
-            if not membership_intervals.empty:
-                membership_intervals = membership_intervals.copy()
-                membership_intervals["company_id"] = membership_intervals["company_id"].astype(str)
-                membership_intervals["member_from"] = pd.to_datetime(
-                    membership_intervals["member_from"], errors="coerce"
-                )
-                membership_intervals["member_to"] = pd.to_datetime(
-                    membership_intervals["member_to"], errors="coerce"
-                )
+        if table not in {"fundamentals", "estimates"}:
+            raise ValueError(table)
         expected_periods = set(pd.period_range(start_date, end_date, freq=frequency))
-        if membership_intervals.empty:
-            return [f"Cannot measure {label} coverage without historical membership intervals"]
-
-        clean = presence.copy()
+        metric_filter = " AND metric = ?" if metric else ""
+        parameters: list[object] = [start_date, end_date]
+        if metric:
+            parameters.append(metric)
+        parameters.extend([start_date, end_date])
+        if metric:
+            parameters.append(metric)
+        # Aggregate at the database so the Supabase status page transfers only
+        # one row per snapshot instead of tens of thousands of company rows.
+        # DISTINCT in ``active`` also protects against overlapping source
+        # membership intervals without inflating the denominator.
+        clean = store.query_df(
+            f"""
+            WITH snapshot_dates AS (
+                SELECT DISTINCT as_of_date AS snapshot_date
+                FROM {table}
+                WHERE as_of_date BETWEEN ? AND ?{metric_filter}
+            ), active AS (
+                SELECT DISTINCT dates.snapshot_date, member.company_id
+                FROM snapshot_dates AS dates
+                JOIN index_membership AS member
+                  ON member.index_code = 'SP500'
+                 AND member.member_from <= dates.snapshot_date
+                 AND (member.member_to IS NULL OR member.member_to >= dates.snapshot_date)
+            ), present AS (
+                SELECT DISTINCT as_of_date AS snapshot_date, company_id
+                FROM {table}
+                WHERE as_of_date BETWEEN ? AND ?{metric_filter}
+            )
+            SELECT active.snapshot_date,
+                   COUNT(*) AS active_count,
+                   COUNT(present.company_id) AS covered
+            FROM active
+            LEFT JOIN present
+              ON present.snapshot_date = active.snapshot_date
+             AND present.company_id = active.company_id
+            GROUP BY active.snapshot_date
+            ORDER BY active.snapshot_date
+            """,
+            parameters,
+        )
         if not clean.empty:
             clean["snapshot_date"] = pd.to_datetime(clean["snapshot_date"], errors="coerce")
-            clean = clean.dropna(subset=["snapshot_date", "company_id"])
-            clean["company_id"] = clean["company_id"].astype(str)
+            clean = clean.dropna(subset=["snapshot_date"])
 
         best: dict[pd.Period, tuple[int, int, float]] = {}
-        for snapshot_date, rows in clean.groupby("snapshot_date"):
+        for row in clean.itertuples(index=False):
+            snapshot_date = pd.Timestamp(row.snapshot_date)
             period = snapshot_date.to_period(frequency)
             if period not in expected_periods:
                 continue
-            active = membership_intervals.loc[
-                (membership_intervals["member_from"] <= snapshot_date)
-                & (
-                    membership_intervals["member_to"].isna()
-                    | (membership_intervals["member_to"] >= snapshot_date)
-                ),
-                "company_id",
-            ]
-            active_ids = set(active)
-            covered = len(active_ids.intersection(rows["company_id"]))
-            active_count = len(active_ids)
+            covered = int(row.covered)
+            active_count = int(row.active_count)
             ratio = covered / active_count if active_count else 0.0
             if period not in best or ratio > best[period][2]:
                 best[period] = (covered, active_count, ratio)
@@ -1423,39 +1435,21 @@ def certify_point_in_time(
                     "Point-in-time fundamentals end too early for the requested backtest end"
                 )
 
-        fundamental_presence = store.query_df(
-            """
-            SELECT DISTINCT as_of_date AS snapshot_date, company_id
-            FROM fundamentals
-            WHERE as_of_date BETWEEN ? AND ?
-            ORDER BY as_of_date, company_id
-            """,
-            [start_date, end_date],
-        )
         coverage_failures.extend(
             historical_universe_coverage(
-                fundamental_presence,
+                "fundamentals",
                 frequency="Q",
                 label="Point-in-time fundamentals",
             )
         )
 
     if "estimates" in status:
-        estimate_presence = store.query_df(
-            """
-            SELECT DISTINCT as_of_date AS snapshot_date, company_id
-            FROM estimates
-            WHERE metric = 'eps_estimate'
-              AND as_of_date BETWEEN ? AND ?
-            ORDER BY as_of_date, company_id
-            """,
-            [start_date, end_date],
-        )
         coverage_failures.extend(
             historical_universe_coverage(
-                estimate_presence,
+                "estimates",
                 frequency="M",
                 label="Point-in-time EPS estimates",
+                metric="eps_estimate",
             )
         )
 

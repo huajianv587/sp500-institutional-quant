@@ -1344,28 +1344,34 @@ def test_certification_rejects_current_only_fundamentals_and_estimates() -> None
                         "last": [pd.Timestamp("2026-08-28")],
                     }
                 )
-            if "FROM fundamentals" in sql and "SELECT DISTINCT as_of_date" in sql:
-                assert parameters == [date(2021, 9, 1), date(2026, 8, 31)]
+            if "WITH snapshot_dates AS" in sql and "FROM fundamentals" in sql:
+                assert parameters == [
+                    date(2021, 9, 1),
+                    date(2026, 8, 31),
+                    date(2021, 9, 1),
+                    date(2026, 8, 31),
+                ]
                 return pd.DataFrame(
                     {
-                        "snapshot_date": [date(2026, 8, 31)] * 500,
-                        "company_id": [str(value) for value in range(500)],
+                        "snapshot_date": [date(2026, 8, 31)],
+                        "active_count": [500],
+                        "covered": [500],
                     }
                 )
-            if "FROM estimates" in sql and "SELECT DISTINCT as_of_date" in sql:
-                assert parameters == [date(2021, 9, 1), date(2026, 8, 31)]
+            if "WITH snapshot_dates AS" in sql and "FROM estimates" in sql:
+                assert parameters == [
+                    date(2021, 9, 1),
+                    date(2026, 8, 31),
+                    "eps_estimate",
+                    date(2021, 9, 1),
+                    date(2026, 8, 31),
+                    "eps_estimate",
+                ]
                 return pd.DataFrame(
                     {
-                        "snapshot_date": [date(2026, 8, 31)] * 500,
-                        "company_id": [str(value) for value in range(500)],
-                    }
-                )
-            if "SELECT company_id, member_from, member_to" in sql:
-                return pd.DataFrame(
-                    {
-                        "company_id": [str(value) for value in range(500)],
-                        "member_from": [date(2021, 9, 1)] * 500,
-                        "member_to": [pd.NaT] * 500,
+                        "snapshot_date": [date(2026, 8, 31)],
+                        "active_count": [500],
+                        "covered": [500],
                     }
                 )
             if "MIN(member_from)" in sql:
