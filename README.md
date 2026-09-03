@@ -60,7 +60,7 @@ cannot invent data, override missing-data gates or submit orders.
 4. **Honest underperformance is a valid result.** SPY, equal-weight, factor-only, ML-only and ensemble ablations are retained with transaction costs and statistical qualification; no test-period tuning is used to manufacture a win.
 5. **Small and understandable beats over-engineered.** The platform is designed for learning and personal research, while keeping strict the few controls that matter: no look-ahead, no hidden data substitution, and paper-only execution.
 
-## Data hierarchy and workflow
+## End-to-end user workflow
 
 Capital IQ Pro is the primary company-research source. It supplies statements,
 filing availability, consensus estimates/revisions, valuation inputs, peers,
@@ -69,13 +69,78 @@ they supply return labels, momentum/volatility features, execution calendars and
 paper-account synchronization. DeepSeek is a reasoning layer, never a source of
 financial facts.
 
-1. Export a Capital IQ screen as CSV/XLSX with stable entity IDs and all required availability fields; keep the original file locally.
-2. Upload it on **Data Status** or call `sp500iq import-ciq`. The importer hashes, validates, normalizes units and writes to Supabase.
-3. Run **Factor Lab** to inspect factor coverage, rank IC, quantile monotonicity, stability and correlations. A stock becomes investable only with at least four of six families and two institutional families.
-4. Run the walk-forward backtest. Training, feature selection and hyperparameter selection use only observations available before each signal cutoff; execution is the next available session open.
-5. Select roughly ten names for an EvidencePacket: new leaders, deteriorating holdings and factor/ML disagreements. Analysts work independently, then bull and bear researchers debate once and rebut once.
-6. Review the judge's rating, dissent, uncertainties and evidence IDs. The optimizer converts the adjusted score into a 20–30 name proposal.
-7. Review the **Paper Trading** preview. Submission is a separate, explicit user action and is accepted only by `https://paper-api.alpaca.markets`.
+The normal operating loop is deliberately simple: the user supplies the
+institutional export, the platform performs the quantitative work, and the user
+approves (or rejects) any simulated order. The same flow can be used for a
+single company review or a 20–50 name S&P 500 watchlist.
+
+```mermaid
+sequenceDiagram
+  actor User
+  participant CIQ as Capital IQ Pro
+  participant App as Quant Platform
+  participant DB as Supabase
+  participant DS as DeepSeek
+  participant Alpaca as Alpaca Paper API
+  User->>CIQ: Export dated CSV/XLSX
+  User->>App: Upload on Data Status
+  App->>DB: Validate, hash and persist rows
+  App->>App: Calculate factors and walk-forward ML scores
+  App->>DS: Send structured EvidencePacket
+  DS-->>App: Analyst views, debate and consensus
+  App->>App: Optimize target weights with deterministic limits
+  App->>Alpaca: Create paper-order preview
+  Alpaca-->>User: Show estimated paper fills
+  User->>Alpaca: Explicitly approve or reject
+```
+
+1. **Export from Capital IQ Pro.** Export the S&P 500 universe and the
+   available fundamentals, estimates/revisions, peer, ownership and adjusted
+   price fields as CSV/XLSX. Include stable company IDs and every available
+   `effective_at`/`as_of_date` field. Keep the original export unchanged.
+2. **Import on Data Status.** Upload the files in the UI (or call
+   `sp500iq import-ciq`). The importer hashes each file, validates columns and
+   timestamps, normalizes units, records rejected rows as data-quality issues,
+   and writes only accepted observations to the Supabase `institutional_quant`
+   schema.
+3. **Discover factors in Factor Lab.** Inspect coverage, rank IC, IC stability,
+   quantile monotonicity and factor correlations. The six families are value,
+   quality, growth, estimate revisions, momentum and low risk. Ownership and
+   insider activity are supplementary features. A name is investable only when
+   the minimum coverage and point-in-time gates pass.
+4. **Score next-month excess return.** Run the walk-forward ElasticNet and
+   histogram-gradient-boosting models. Feature selection, model settings and
+   labels are isolated inside each historical training window; the execution
+   price is the next available session open. Use **Backtest** to compare SPY,
+   equal-weight, factor-only, ML-only and ensemble portfolios.
+5. **Run company research and debate.** The platform selects roughly ten names:
+   new quantitative leaders, deteriorating holdings and factor/ML disagreements.
+   It builds one immutable `EvidencePacket` per name, then runs independent
+   fundamental, valuation, estimates/peer and risk analysts followed by one
+   bull/bear opening round and one rebuttal round.
+6. **Read the investment report.** The Consensus Judge returns a five-tier
+   rating—**Buy, Hold, Sell, Watch, or Avoid**—with dissent, uncertainties,
+   evidence references and a capped quantitative score adjustment. The report
+   is a research decision aid; it is not personalized investment advice.
+7. **Combine with current holdings.** The Portfolio page compares the proposed
+   names with current paper holdings, highlights adds/reductions/exits and
+   calculates deterministic target weights. Limits include long-only exposure,
+   approximately 12% annualized volatility, 5% maximum per stock, SPY sector
+   deviation targets and weekly/monthly turnover caps. Agents cannot set final
+   weights or bypass these limits.
+8. **Preview and approve paper orders.** Review share deltas, notionals and
+   constraints in **Paper Trading**. The platform talks only to
+   `https://paper-api.alpaca.markets`; it creates a preview first and submits
+   only after an explicit user approval. Paper fills are simulated and must not
+   be interpreted as live-trading performance.
+
+### Cadence
+
+- **Daily:** synchronize Alpaca paper prices/fills and raise risk alerts; do not
+  rerun the full Agent committee.
+- **Weekly:** refresh market-risk features and permit only limited adjustments.
+- **Monthly:** import fresh Capital IQ exports, rebuild factors and ML signals,
+  run the Agent debate and produce new target weights.
 
 ## Environment and quick start
 
