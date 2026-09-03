@@ -6,7 +6,7 @@
   <title>Institutional Quant</title>
   <!-- Tabler UI kit (MIT): https://github.com/tabler/tabler -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css">
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v=20260903">
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v=20260903-2">
 </head>
 <body class="layout-fluid">
   <aside class="sidebar">
@@ -53,10 +53,22 @@
     </section>
     <section class="panel cadence-panel"><div class="panel-title"><h2>Run the operating cycle</h2><span>Daily monitor · weekly adjustment · monthly deployment</span></div>
       <div class="cadence-actions">
-        <button class="btn btn-outline-primary cadence-button" data-cadence="daily">Run daily selection</button>
-        <button class="btn btn-outline-primary cadence-button" data-cadence="weekly">Run weekly adjustment</button>
-        <button class="btn btn-primary cadence-button" data-cadence="monthly">Run monthly research</button>
-        <button class="btn btn-outline-secondary cadence-button" data-cadence="full-cycle">Run full demonstration</button>
+        <div class="cadence-tooltip">
+          <button class="btn btn-outline-primary cadence-button" data-cadence="daily" aria-describedby="daily-requirements">Run daily selection</button>
+          <div id="daily-requirements" class="cadence-tooltip-content" role="tooltip"><b>Daily selection: required inputs</b><ol><li>S&amp;P 500 current universe export.</li><li>Price Change 1D export.</li><li>Price Change 1W export.</li><li>Price Change 1M export.</li><li>Alpaca paper positions, synchronized automatically.</li></ol></div>
+        </div>
+        <div class="cadence-tooltip">
+          <button class="btn btn-outline-primary cadence-button" data-cadence="weekly" aria-describedby="weekly-requirements">Run weekly adjustment</button>
+          <div id="weekly-requirements" class="cadence-tooltip-content" role="tooltip"><b>Weekly adjustment: required inputs</b><ol><li>S&amp;P 500 current universe export.</li><li>Latest 1D / 1W / 1M return snapshot.</li><li>Historical adjusted-close price history.</li><li>Sector classification from the instrument export.</li><li>Alpaca paper positions, synchronized automatically.</li></ol></div>
+        </div>
+        <div class="cadence-tooltip">
+          <button class="btn btn-outline-primary cadence-button" data-cadence="monthly" aria-describedby="monthly-requirements">Run monthly research</button>
+          <div id="monthly-requirements" class="cadence-tooltip-content" role="tooltip"><b>Monthly research: required inputs</b><ol><li>Historical S&amp;P 500 membership export.</li><li>Point-in-time financial statements.</li><li>Point-in-time consensus estimates and revisions.</li><li>Historical adjusted prices and corporate actions.</li><li>Comparable companies, ownership and insider activity.</li></ol></div>
+        </div>
+        <div class="cadence-tooltip">
+          <button class="btn btn-outline-primary cadence-button" data-cadence="full-cycle" aria-describedby="full-cycle-requirements">Run full demonstration</button>
+          <div id="full-cycle-requirements" class="cadence-tooltip-content" role="tooltip"><b>Full demonstration: required inputs</b><ol><li>S&amp;P 500 universe and historical membership.</li><li>Financial statements and estimates / revisions.</li><li>Historical adjusted prices plus 1D / 1W / 1M returns.</li><li>Peer, ownership and insider datasets where available.</li><li>Alpaca paper account for preview only; approval remains manual.</li></ol></div>
+        </div>
       </div>
       <pre id="operation-result" class="import-result">Operations are asynchronous. Start with a validated snapshot, then run one cadence at a time.</pre>
     </section>
@@ -240,6 +252,8 @@
       button.addEventListener('click', async () => {
         const result = document.getElementById('operation-result');
         const cadence = button.dataset.cadence;
+        document.querySelectorAll('.cadence-button').forEach((item) => item.classList.remove('is-active'));
+        button.classList.add('is-active');
         result.textContent = `Starting ${cadence} workflow. This page stays responsive while the task runs.`;
         result.className = 'import-result';
         try {

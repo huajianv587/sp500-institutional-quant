@@ -169,6 +169,14 @@ details[open] summary::after { content: "−"; }
 .guide-step strong { margin-left: auto; color: var(--subtle); font-size: 18px; font-weight: 400; }
 .cadence-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 18px 20px 0; }
 .cadence-button { min-height: 38px; border-radius: 7px; font-weight: 700; }
+.cadence-button.is-active { border-color: var(--accent); background: var(--accent); color: #fff; }
+.cadence-button.is-active:hover, .cadence-button.is-active:focus { border-color: #1d4ed8; background: #1d4ed8; color: #fff; }
+.cadence-tooltip { position: relative; }
+.cadence-tooltip-content { position: absolute; z-index: 20; top: calc(100% + 10px); left: 0; display: none; width: min(340px, calc(100vw - 48px)); padding: 13px 14px; border: 1px solid #cbd5e1; border-radius: 7px; background: #fff; box-shadow: 0 12px 26px rgba(16, 24, 40, .14); color: #344054; font-size: 12px; line-height: 1.45; }
+.cadence-tooltip-content b { display: block; margin-bottom: 6px; color: var(--ink); font-size: 12px; }
+.cadence-tooltip-content ol { margin: 0; padding-left: 19px; }
+.cadence-tooltip-content li + li { margin-top: 3px; }
+.cadence-tooltip:hover .cadence-tooltip-content, .cadence-tooltip:focus-within .cadence-tooltip-content { display: block; }
 .cadence-panel .import-result { margin-top: 16px; }
 .quality-panel { overflow: visible; }
 .quality-panel .panel-title { border-bottom: 0; }
