@@ -74,16 +74,10 @@
     </section>
     <section class="panel upload-panel"><div class="panel-title"><h2>Upload a Capital IQ export</h2><span>CSV/XLSX · validated before import</span></div>
       <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
-        <label>Dataset<select id="ciq-dataset" name="dataset" required>
-          <option value="instruments">Instruments / current universe</option>
-          <option value="index_membership">Historical S&amp;P 500 membership</option>
-          <option value="fundamentals">Financial statements / fundamentals</option>
-          <option value="estimates">Consensus estimates / revisions</option>
-          <option value="prices">Adjusted prices / corporate actions</option>
-          <option value="market_returns">Current market returns (1D / 1W / 1M)</option>
-          <option value="ownership">Ownership</option>
-          <option value="insider_transactions">Insider transactions</option>
-        </select></label>
+        <input id="ciq-dataset" name="dataset" type="hidden" value="auto">
+        <input name="current_snapshot_as_of" type="hidden" value="">
+        <input name="current_snapshot_effective_at" type="hidden" value="">
+        <div class="auto-import-status"><b>Automatic import</b><span id="ciq-detection-status">Choose one Capital IQ CSV/XLSX. The platform detects the dataset, dates and validation rules.</span></div>
         <label class="file-field">Capital IQ CSV/XLSX
           <span class="file-picker">
             <input id="ciq-file" name="file" type="file" accept=".csv,.xlsx,.xls" required>
@@ -92,11 +86,9 @@
           </span>
         </label>
         <input id="ciq-timestamp-provenance" name="current_snapshot_timestamp_provenance" type="hidden" value="">
-        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"><small>For a 1D / 1W / 1M snapshot, this is filled from a YYYY-MM-DD filename when available.</small></label>
-        <label>Observed at / import time (current snapshot)<input name="current_snapshot_effective_at" type="datetime-local"><small>Automatically filled for current returns. Replace it with the Capital IQ export time when known.</small></label>
         <button class="btn btn-primary" type="submit">Validate and import</button>
       </form>
-      <pre id="ciq-import-result" class="import-result">Select the matching dataset. A 1D / 1W / 1M percentage snapshot belongs to market_returns; adjusted prices require historical OHLC and adjusted-close fields.</pre>
+      <pre id="ciq-import-result" class="import-result">Upload a Capital IQ export. The platform classifies it before any data is written, preserves the original file and validates its point-in-time fields.</pre>
     </section>
     <section class="{% if certified %}success{% else %}warning{% endif %}">
       <b>{% if certified %}Five-year research gate passed{% else %}Five-year research gate is not ready{% endif %}</b>
@@ -215,12 +207,13 @@
   </main>
   {% if slug == 'data-status' %}
   <script>
-    const datasetSelect = document.getElementById('ciq-dataset');
+    const datasetInput = document.getElementById('ciq-dataset');
     const importForm = document.getElementById('ciq-import-form');
     const snapshotAsOf = importForm.querySelector('[name="current_snapshot_as_of"]');
     const snapshotEffectiveAt = importForm.querySelector('[name="current_snapshot_effective_at"]');
     const timestampProvenance = document.getElementById('ciq-timestamp-provenance');
     const uploadFile = document.getElementById('ciq-file');
+    const detectionStatus = document.getElementById('ciq-detection-status');
     const localDatetimeValue = () => {
       const now = new Date();
       const pad = (value) => String(value).padStart(2, '0');
@@ -228,7 +221,6 @@
     };
     const applyMarketReturnDefaults = (file) => {
       if (!file || !/returns[_-]?1d[_-]?1w[_-]?1m/i.test(file.name)) return;
-      datasetSelect.value = 'market_returns';
       const match = file.name.match(/(20\d{2})[-_](\d{2})[-_](\d{2})/);
       if (match && !snapshotAsOf.value) snapshotAsOf.value = `${match[1]}-${match[2]}-${match[3]}`;
       if (!snapshotEffectiveAt.value) {
@@ -236,29 +228,10 @@
         timestampProvenance.value = 'browser_inferred_import_timestamp';
       }
     };
-    snapshotEffectiveAt.addEventListener('input', () => {
-      if (snapshotEffectiveAt.value) timestampProvenance.value = 'operator_confirmed_export_timestamp';
-    });
     importForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const result = document.getElementById('ciq-import-result');
-      if (datasetSelect.value === 'market_returns') {
-        applyMarketReturnDefaults(uploadFile.files[0]);
-        if (!snapshotAsOf.value) {
-          result.textContent = 'Add YYYY-MM-DD to the filename or enter the snapshot as-of date.';
-          result.className = 'import-result failed';
-          return;
-        }
-        if (!snapshotEffectiveAt.value) {
-          snapshotEffectiveAt.value = localDatetimeValue();
-          timestampProvenance.value = 'browser_inferred_import_timestamp';
-        }
-      }
-      if (datasetSelect.value === 'prices' && (snapshotAsOf.value || snapshotEffectiveAt.value)) {
-        result.textContent = 'Choose Current market returns (1D / 1W / 1M) for a percentage snapshot. Adjusted prices require historical price_date/effective_at fields.';
-        result.className = 'import-result failed';
-        return;
-      }
+      applyMarketReturnDefaults(uploadFile.files[0]);
       result.textContent = 'Validating and importing…';
       try {
         const response = await fetch(event.currentTarget.action, {
@@ -266,7 +239,7 @@
         });
         const payload = await response.json();
         result.textContent = response.ok
-          ? `Imported ${payload.imported_rows} rows. Source file: ${payload.source_file_id}${payload.idempotent ? ' (already imported)' : ''}.`
+          ? `Detected ${payload.dataset}. Imported ${payload.imported_rows} rows. Source file: ${payload.source_file_id}${payload.idempotent ? ' (already imported)' : ''}.`
           : `Import blocked: ${payload.detail || 'The server could not validate this file.'}`;
         result.className = 'import-result ' + (response.ok ? 'ok' : 'failed');
       } catch (error) {
@@ -276,8 +249,12 @@
     });
     uploadFile.addEventListener('change', (event) => {
       const file = event.currentTarget.files[0];
+      datasetInput.value = 'auto';
       applyMarketReturnDefaults(file);
       document.getElementById('ciq-file-name').textContent = file ? file.name : 'No file selected';
+      detectionStatus.textContent = file
+        ? 'Ready for automatic classification and validation. No dates or dataset selection are required.'
+        : 'Choose one Capital IQ CSV/XLSX. The platform detects the dataset, dates and validation rules.';
     });
     document.querySelectorAll('.cadence-button').forEach((button) => {
       button.addEventListener('click', async () => {

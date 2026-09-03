@@ -405,6 +405,62 @@ class CapitalIQImporter:
         return frame
 
     @staticmethod
+    def detect_dataset(path: str | Path, original_name: str | None = None) -> DatasetKind:
+        """Classify a Capital IQ export from stable filename and header signals.
+
+        This deliberately returns a result only for unambiguous patterns.  An
+        incorrect dataset can silently corrupt a research history, so callers
+        must ask for a better export when the available evidence is weak.
+        """
+        source = Path(path)
+        filename = _column_key(original_name or source.name)
+        frame, _ = CapitalIQImporter.read_with_metadata(source)
+        columns = {_column_key(column) for column in frame.columns}
+
+        price_change_columns = [column for column in columns if "price_change" in column]
+        if (
+            "returns_1d_1w_1m" in filename
+            or "returns_1d_1w_1m" in filename.replace("_", "")
+            or len(price_change_columns) >= 3
+            or {"return_1d", "return_1w", "return_1m"} <= columns
+        ):
+            return DatasetKind.MARKET_RETURNS
+        if {"member_from", "member_to"} <= columns or "membership" in filename:
+            return DatasetKind.INDEX_MEMBERSHIP
+        if {"transaction_date", "transaction_type"} <= columns or "insider" in filename:
+            return DatasetKind.INSIDER_TRANSACTIONS
+        if "institutional_pct" in columns or "institutional_ownership" in filename:
+            return DatasetKind.OWNERSHIP
+        if {"price_date", "close"} <= columns or {"date", "adj_close"} <= columns:
+            return DatasetKind.PRICES
+
+        estimate_markers = {
+            "sp_eps_norm_est",
+            "sp_revenue_estimate",
+            "sp_rev_est",
+            "sp_eps_norm_est_up_month",
+            "sp_eps_norm_est_down_month",
+            "eps_estimate",
+            "revenue_estimate",
+        }
+        if columns & estimate_markers or "estimate" in filename or "revision" in filename:
+            return DatasetKind.ESTIMATES
+
+        fundamental_markers = set(CANONICAL_METRIC_ALIASES) - estimate_markers
+        if columns & fundamental_markers or "fundamental" in filename or "financial" in filename:
+            return DatasetKind.FUNDAMENTALS
+
+        identity_markers = {"company_id", "sp_entity_id", "ticker", "sp_exchange_ticker"}
+        descriptive_markers = {"company_name", "sp_entity_name", "sector", "iq_sector"}
+        if columns & identity_markers and columns & descriptive_markers:
+            return DatasetKind.INSTRUMENTS
+
+        raise ValueError(
+            "The platform could not classify this export automatically. Use a standard Capital IQ "
+            "Results As Values export with company ID/ticker and the relevant data columns."
+        )
+
+    @staticmethod
     def read_with_metadata(path: Path) -> tuple[pd.DataFrame, dict[str, object]]:
         suffix = path.suffix.lower()
         if suffix == ".csv":

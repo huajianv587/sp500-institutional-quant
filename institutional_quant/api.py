@@ -239,8 +239,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/v1/imports/ciq")
     async def import_ciq(
-        dataset: Annotated[DatasetKind, Form()],
         file: Annotated[UploadFile, File()],
+        dataset: Annotated[str, Form()] = "auto",
         current_snapshot_as_of: Annotated[date | None, Form()] = None,
         current_snapshot_effective_at: Annotated[datetime | None, Form()] = None,
         current_snapshot_timestamp_provenance: Annotated[str | None, Form()] = None,
@@ -250,8 +250,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             shutil.copyfileobj(file.file, temporary)
             path = Path(temporary.name)
         try:
+            requested_dataset = dataset.strip().lower()
+            resolved_dataset = (
+                CapitalIQImporter.detect_dataset(path, file.filename)
+                if requested_dataset == "auto"
+                else DatasetKind(requested_dataset)
+            )
             timestamp_provenance = current_snapshot_timestamp_provenance
-            if dataset is DatasetKind.MARKET_RETURNS:
+            if resolved_dataset is DatasetKind.MARKET_RETURNS:
                 filename = file.filename or ""
                 inferred_as_of = False
                 inferred_effective_at = False
@@ -273,7 +279,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     timestamp_provenance = "server_inferred_upload_timestamp"
             result = CapitalIQImporter(store, settings).import_file(
                 path,
-                dataset,
+                resolved_dataset,
                 current_snapshot_as_of=current_snapshot_as_of,
                 current_snapshot_effective_at=current_snapshot_effective_at,
                 current_snapshot_timestamp_provenance=timestamp_provenance,

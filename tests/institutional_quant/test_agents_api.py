@@ -265,7 +265,7 @@ def test_dashboard_and_health_use_duckdb_fixture(tmp_path) -> None:
         assert "Five-year research gate is not ready" in page.text
         assert "Upload a Capital IQ export" in page.text
         assert 'action="/api/v1/imports/ciq"' in page.text
-        assert "Automatically filled for current returns" in page.text
+        assert "Automatic import" in page.text
 
 
 def test_current_market_returns_upload_infers_missing_snapshot_timestamps(tmp_path) -> None:
@@ -282,7 +282,7 @@ def test_current_market_returns_upload_infers_missing_snapshot_timestamps(tmp_pa
     with TestClient(create_app(settings)) as client:
         response = client.post(
             "/api/v1/imports/ciq",
-            data={"dataset": "market_returns"},
+            data={"dataset": "auto"},
             files={
                 "file": (
                     "ciq_sp500_returns_1d_1w_1m_2026-09-03.csv",

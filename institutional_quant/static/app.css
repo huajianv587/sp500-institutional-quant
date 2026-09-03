@@ -208,6 +208,9 @@ tr:last-child td { border-bottom: 0; }
 .issue.info { border-left: 3px solid var(--accent); }
 
 .import-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; padding: 20px; }
+.auto-import-status { display: grid; gap: 4px; min-height: 40px; padding: 10px 12px; border: 1px solid #c7d7fe; border-radius: 7px; background: #f5f8ff; color: #344054; }
+.auto-import-status b { color: #1d4ed8; font-size: 12px; }
+.auto-import-status span { color: #526175; font-size: 12px; line-height: 1.35; }
 .import-form label { display: grid; gap: 6px; color: #475467; font-size: 12px; font-weight: 700; }
 .import-form input, .import-form select { width: 100%; min-height: 40px; padding: 9px 11px; border: 1px solid #d0d5dd; border-radius: 7px; background: #fff; color: var(--ink); font: inherit; }
 .file-picker { position: relative; display: flex; align-items: center; gap: 10px; min-height: 40px; overflow: hidden; padding: 4px 10px 4px 4px; border: 1px solid #d0d5dd; border-radius: 7px; background: #fff; color: var(--muted); font-weight: 500; }
