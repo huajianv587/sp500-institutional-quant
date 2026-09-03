@@ -18,6 +18,7 @@ class ModelSelection:
     tree_params: dict[str, float | int]
     elastic_validation_mae: float | None
     tree_validation_mae: float | None
+    feature_columns: tuple[str, ...]
 
 
 class WalkForwardModel:
@@ -26,6 +27,7 @@ class WalkForwardModel:
     def __init__(self, min_training_months: int = 24, validation_months: int = 6):
         self.min_training_months = min_training_months
         self.validation_months = validation_months
+        self._annual_selections: dict[int, ModelSelection] = {}
 
     @staticmethod
     def _elastic(params: dict[str, float]) -> Pipeline:
@@ -66,15 +68,27 @@ class WalkForwardModel:
     def _select(self, train: pd.DataFrame, features: list[str], target: str) -> ModelSelection:
         months = sorted(pd.to_datetime(train["as_of_date"]).dt.date.unique())
         if len(months) <= self.validation_months:
+            available = tuple(feature for feature in features if train[feature].notna().any())
             return ModelSelection(
                 {"alpha": 0.01, "l1_ratio": 0.5},
                 {"learning_rate": 0.05, "max_leaf_nodes": 15},
                 None,
                 None,
+                available,
             )
         validation_set = set(months[-self.validation_months :])
         core = train.loc[~pd.to_datetime(train["as_of_date"]).dt.date.isin(validation_set)]
         validation = train.loc[pd.to_datetime(train["as_of_date"]).dt.date.isin(validation_set)]
+        available = tuple(feature for feature in features if core[feature].notna().any())
+        if not available:
+            return ModelSelection(
+                {"alpha": 0.01, "l1_ratio": 0.5},
+                {"learning_rate": 0.05, "max_leaf_nodes": 15},
+                None,
+                None,
+                (),
+            )
+        features = list(available)
         x_core, y_core = core[features], core[target]
         x_validation, y_validation = validation[features], validation[target]
 
@@ -101,7 +115,7 @@ class WalkForwardModel:
 
         elastic_mae, elastic_params = best(elastic_candidates, self._elastic)
         tree_mae, tree_params = best(tree_candidates, self._tree)
-        return ModelSelection(elastic_params, tree_params, elastic_mae, tree_mae)
+        return ModelSelection(elastic_params, tree_params, elastic_mae, tree_mae, available)
 
     def predict(
         self,
@@ -127,15 +141,26 @@ class WalkForwardModel:
             output["ensemble_score"] = output["factor_score"]
             return output, None
 
-        selection = self._select(eligible, feature_columns, target_column)
+        prediction_year = int(pd.to_datetime(current["as_of_date"]).dt.year.min())
+        selection = self._annual_selections.get(prediction_year)
+        if selection is None:
+            selection = self._select(eligible, feature_columns, target_column)
+            self._annual_selections[prediction_year] = selection
+        selected_features = list(selection.feature_columns)
+        if not selected_features:
+            output["elastic_score"] = 0.0
+            output["tree_score"] = 0.0
+            output["ml_score"] = 0.0
+            output["ensemble_score"] = output["factor_score"]
+            return output, selection
         elastic = TransformedTargetRegressor(
             regressor=self._elastic(selection.elastic_params), transformer=StandardScaler()
         )
         tree = self._tree(selection.tree_params)
-        elastic.fit(eligible[feature_columns], eligible[target_column])
-        tree.fit(eligible[feature_columns], eligible[target_column])
-        output["elastic_score"] = elastic.predict(output[feature_columns])
-        output["tree_score"] = tree.predict(output[feature_columns])
+        elastic.fit(eligible[selected_features], eligible[target_column])
+        tree.fit(eligible[selected_features], eligible[target_column])
+        output["elastic_score"] = elastic.predict(output[selected_features])
+        output["tree_score"] = tree.predict(output[selected_features])
         output["ml_score"] = (
             output["elastic_score"].rank(pct=True) + output["tree_score"].rank(pct=True)
         ) / 2

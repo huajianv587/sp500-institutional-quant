@@ -75,9 +75,54 @@ def _combine_factor_families(frame: pd.DataFrame) -> pd.DataFrame:
 class FactorEngine:
     def __init__(self, store: Store):
         self.store = store
+        self._preloaded_tables: dict[str, pd.DataFrame] | None = None
+
+    def preload(self) -> None:
+        """Freeze source tables once for a reproducible analytical run."""
+        self._preloaded_tables = {
+            table: self.store.query_df(f"SELECT * FROM {table}")
+            for table in ("instruments", "index_membership", "fundamentals", "estimates")
+        }
+
+    def _preloaded(self, table: str) -> pd.DataFrame | None:
+        if self._preloaded_tables is None:
+            return None
+        return self._preloaded_tables[table]
 
     def _universe(self, as_of_date: date) -> pd.DataFrame:
         cutoff = datetime.combine(as_of_date, time.max)
+        cached_membership = self._preloaded("index_membership")
+        cached_instruments = self._preloaded("instruments")
+        if cached_membership is not None and cached_instruments is not None:
+            membership = cached_membership.copy()
+            membership["member_from"] = pd.to_datetime(membership["member_from"])
+            membership["member_to"] = pd.to_datetime(membership["member_to"])
+            membership["effective_at"] = pd.to_datetime(membership["effective_at"])
+            signal = pd.Timestamp(as_of_date)
+            membership = membership.loc[
+                (membership["index_code"] == "SP500")
+                & (membership["member_from"] <= signal)
+                & (membership["member_to"].isna() | (membership["member_to"] >= signal))
+                & (membership["effective_at"] <= pd.Timestamp(cutoff))
+            ].copy()
+
+            instruments = cached_instruments.copy()
+            instruments["effective_at"] = pd.to_datetime(instruments["effective_at"])
+            instruments = (
+                instruments.loc[instruments["effective_at"] <= pd.Timestamp(cutoff)]
+                .sort_values(["company_id", "effective_at"], ascending=[True, False])
+                .drop_duplicates("company_id", keep="first")
+            )
+            universe = membership.merge(
+                instruments[["company_id", "company_name", "sector"]],
+                on="company_id",
+                how="left",
+            )
+            universe["sector"] = universe["sector"].fillna("Unknown")
+            universe["company_name"] = universe["company_name"].fillna(universe["ticker"])
+            return universe[["company_id", "ticker", "sector", "company_name"]].sort_values(
+                "company_id", ignore_index=True
+            )
         return self.store.query_df(
             """
             WITH latest_instrument AS (
@@ -105,25 +150,54 @@ class FactorEngine:
             raise ValueError(table)
         cutoff = datetime.combine(as_of_date, time.max)
         period_column = "period_end" if table == "fundamentals" else "fiscal_period"
-        frame = self.store.query_df(
-            f"""
-            WITH ranked AS (
-                SELECT company_id, metric, value, source_file_id, effective_at,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY company_id, metric
-                           ORDER BY {period_column} DESC, effective_at DESC,
-                                    as_of_date DESC, ingested_at DESC
-                       ) AS rn
-                FROM {table}
-                WHERE effective_at <= ? AND as_of_date <= ?
+        cached = self._preloaded(table)
+        if cached is not None:
+            frame = cached.copy()
+            frame["effective_at"] = pd.to_datetime(frame["effective_at"])
+            frame["as_of_date"] = pd.to_datetime(frame["as_of_date"])
+            frame[period_column] = pd.to_datetime(frame[period_column])
+            frame["ingested_at"] = pd.to_datetime(frame["ingested_at"])
+            frame = frame.loc[
+                (frame["effective_at"] <= pd.Timestamp(cutoff))
+                & (frame["as_of_date"] <= pd.Timestamp(as_of_date))
+            ].sort_values(
+                [
+                    "company_id",
+                    "metric",
+                    period_column,
+                    "effective_at",
+                    "as_of_date",
+                    "ingested_at",
+                ],
+                ascending=[True, True, False, False, False, False],
             )
-            SELECT company_id, metric, value, source_file_id, effective_at
-            FROM ranked WHERE rn = 1
-            """,
-            [cutoff, as_of_date],
-        )
+            frame = frame.drop_duplicates(["company_id", "metric"], keep="first")[
+                ["company_id", "metric", "value", "source_file_id", "effective_at"]
+            ]
+        else:
+            frame = self.store.query_df(
+                f"""
+                WITH ranked AS (
+                    SELECT company_id, metric, value, source_file_id, effective_at,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY company_id, metric
+                               ORDER BY {period_column} DESC, effective_at DESC,
+                                        as_of_date DESC, ingested_at DESC
+                           ) AS rn
+                    FROM {table}
+                    WHERE effective_at <= ? AND as_of_date <= ?
+                )
+                SELECT company_id, metric, value, source_file_id, effective_at
+                FROM ranked WHERE rn = 1
+                """,
+                [cutoff, as_of_date],
+            )
         if frame.empty:
-            return pd.DataFrame(), []
+            # Keep the join key even when no point-in-time observations existed
+            # before the signal cutoff.  Early backtest dates legitimately have
+            # an empty institutional snapshot; a schemaful empty frame lets the
+            # universe continue with missing factors instead of crashing.
+            return pd.DataFrame(columns=["company_id"]), []
         sources = sorted(set(frame["source_file_id"].astype(str)))
         wide = frame.pivot(index="company_id", columns="metric", values="value")
         wide.columns = [str(column).strip().lower() for column in wide.columns]
@@ -185,18 +259,40 @@ class FactorEngine:
     def _historical_estimate_changes(self, as_of_date: date) -> tuple[pd.DataFrame, list[str]]:
         cutoff = datetime.combine(as_of_date, time.max)
         history_start = (pd.Timestamp(as_of_date) - pd.DateOffset(months=4)).date()
-        history = self.store.query_df(
-            """
-            SELECT company_id, fiscal_period, as_of_date, effective_at, value,
-                   source_file_id, ingested_at
-            FROM estimates
-            WHERE metric = 'eps_estimate'
-              AND as_of_date BETWEEN ? AND ?
-              AND effective_at <= ?
-            ORDER BY company_id, as_of_date, effective_at, ingested_at
-            """,
-            [history_start, as_of_date, cutoff],
-        )
+        cached = self._preloaded("estimates")
+        if cached is not None:
+            history = cached.copy()
+            history["as_of_date"] = pd.to_datetime(history["as_of_date"])
+            history["effective_at"] = pd.to_datetime(history["effective_at"])
+            history = history.loc[
+                (history["metric"] == "eps_estimate")
+                & (history["as_of_date"] >= pd.Timestamp(history_start))
+                & (history["as_of_date"] <= pd.Timestamp(as_of_date))
+                & (history["effective_at"] <= pd.Timestamp(cutoff))
+            ][
+                [
+                    "company_id",
+                    "fiscal_period",
+                    "as_of_date",
+                    "effective_at",
+                    "value",
+                    "source_file_id",
+                    "ingested_at",
+                ]
+            ].sort_values(["company_id", "as_of_date", "effective_at", "ingested_at"])
+        else:
+            history = self.store.query_df(
+                """
+                SELECT company_id, fiscal_period, as_of_date, effective_at, value,
+                       source_file_id, ingested_at
+                FROM estimates
+                WHERE metric = 'eps_estimate'
+                  AND as_of_date BETWEEN ? AND ?
+                  AND effective_at <= ?
+                ORDER BY company_id, as_of_date, effective_at, ingested_at
+                """,
+                [history_start, as_of_date, cutoff],
+            )
         if history.empty:
             return pd.DataFrame(columns=["company_id"]), []
         sources = sorted(set(history["source_file_id"].astype(str)))
@@ -271,6 +367,12 @@ class FactorEngine:
             {feature for family in FACTOR_FAMILIES.values() for feature in family}
         )
         for row in frame.to_dict(orient="records"):
+            # A historical universe row can legitimately be ineligible before
+            # enough institutional factor families are available.  It remains
+            # in the walk-forward training universe, but there is no valid
+            # factor observation to persist for that company-month.
+            if pd.isna(row.get("factor_score")):
+                continue
             feature_json = {
                 key: (None if pd.isna(row.get(key)) else float(row[key])) for key in raw_features
             }
@@ -290,4 +392,6 @@ class FactorEngine:
                     "source_snapshot_hash": row["source_snapshot_hash"],
                 }
             )
+        if not records:
+            return
         self.store.insert_frame("factor_observations", pd.DataFrame(records))

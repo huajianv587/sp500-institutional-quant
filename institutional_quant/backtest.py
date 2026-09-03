@@ -246,6 +246,7 @@ class BacktestEngine:
         certified, notes = certify_point_in_time(self.store, spec.start_date, spec.end_date)
         if not certified:
             raise ValueError("Backtest certification failed: " + "; ".join(notes))
+        self.factors.preload()
         load_start = (pd.Timestamp(spec.start_date) - pd.DateOffset(months=38, days=450)).date()
         load_end = spec.end_date + timedelta(days=40)
         prices = self._prices(load_start, load_end)
@@ -283,11 +284,18 @@ class BacktestEngine:
                 predicted["ensemble_score"] = predicted["factor_score"].rank(pct=True)
             else:
                 predicted, _ = self.ml.predict(training, labelled, feature_columns)
-            self.factors.persist(predicted)
             month_frames.append(
                 MonthFrame(signal, forward[signal]["return_date"].iloc[0], predicted)
             )
             history.append(labelled)
+
+        # Supabase is the system of record, but factor generation is an
+        # analytical batch.  Persist all company-month observations in one
+        # upsert instead of opening a network COPY transaction every month.
+        if month_frames:
+            self.factors.persist(
+                pd.concat([month.frame for month in month_frames], ignore_index=True)
+            )
 
         records: list[dict[str, object]] = []
         ic_records: list[dict[str, object]] = []
@@ -300,6 +308,7 @@ class BacktestEngine:
         previous: dict[str, dict[str, float]] = {name: {} for name in strategy_columns}
         previous_equal: dict[str, float] = {}
         overlay_months: set[date] = set()
+        insufficient_score_months: dict[str, int] = dict.fromkeys(strategy_columns, 0)
         for month in month_frames:
             frame = month.frame
             if month.return_date < spec.start_date or month.return_date > spec.end_date:
@@ -365,7 +374,11 @@ class BacktestEngine:
                 valid = universe[[factor, "next_month_excess_return"]].dropna()
                 ic = (
                     float(spearmanr(valid[factor], valid["next_month_excess_return"]).statistic)
-                    if len(valid) >= 5
+                    if (
+                        len(valid) >= 5
+                        and valid[factor].nunique(dropna=True) > 1
+                        and valid["next_month_excess_return"].nunique(dropna=True) > 1
+                    )
                     else np.nan
                 )
                 ic_records.append(
@@ -392,11 +405,27 @@ class BacktestEngine:
             factor_correlations.append(universe[family_columns].corr(method="spearman"))
             sector_weights = universe["sector"].value_counts(normalize=True).to_dict()
             for name, column in strategy_columns.items():
+                eligible_candidates = universe.dropna(subset=[column]).copy()
+                if len(eligible_candidates) < spec.min_positions:
+                    # Missing institutional coverage cannot be overridden by a
+                    # narrative or a fallback score.  Hold the existing book;
+                    # before initial funding this is an explicit cash month.
+                    weights = previous[name]
+                    gross = sum(
+                        weights.get(row.ticker, 0.0) * float(row.next_return)
+                        for row in universe.itertuples()
+                    )
+                    record[name] = gross
+                    record[f"{name}_turnover"] = 0.0
+                    insufficient_score_months[name] += 1
+                    continue
                 returns_history = self._returns_history(
-                    prices, month.signal_date, universe[["company_id", "ticker"]]
+                    prices,
+                    month.signal_date,
+                    eligible_candidates[["company_id", "ticker"]],
                 )
                 recommendation = self.optimizer.optimize(
-                    universe,
+                    eligible_candidates,
                     returns_history,
                     month.signal_date,
                     score_column=column,
@@ -508,13 +537,44 @@ class BacktestEngine:
             if factor_correlations
             else pd.DataFrame()
         )
+        coverage_notes = [
+            (
+                f"{name} held its existing portfolio (cash before initial funding) for "
+                f"{months} month(s) because fewer than {spec.min_positions} stocks had a "
+                "valid score."
+            )
+            for name, months in insufficient_score_months.items()
+            if months
+        ]
+        sector_values = (
+            pd.concat(
+                [month.frame["sector"] for month in month_frames if "sector" in month.frame],
+                ignore_index=True,
+            )
+            if month_frames
+            else pd.Series(dtype="string")
+        )
+        unknown_sector_share = (
+            float(sector_values.fillna("Unknown").astype(str).eq("Unknown").mean())
+            if not sector_values.empty
+            else 0.0
+        )
+        sector_notes = []
+        if unknown_sector_share >= 0.5:
+            sector_notes.append(
+                "Historical point-in-time sector classifications were not present in the supplied exports; "
+                "affected rows are labeled Unknown and sector-neutral constraints are not economically meaningful "
+                "for this run. Add a dated CIQ sector export before using sector exposure as a certified control."
+            )
         result = BacktestResult(
             spec=spec,
             certified_point_in_time=True,
             certification_notes=notes
             + [
                 "Signals use data effective by month-end; orders use the next available session open."
-            ],
+            ]
+            + sector_notes
+            + coverage_notes,
             metrics=metrics,
             monthly_returns=monthly.replace({np.nan: None}).to_dict(orient="records"),
             factor_ic=ic_records,

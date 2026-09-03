@@ -16,7 +16,7 @@ from institutional_quant.config import Settings
 from institutional_quant.demo import build_synthetic_demo
 from institutional_quant.factors import FactorEngine, _combine_factor_families
 from institutional_quant.ingestion import CapitalIQImporter, certify_point_in_time
-from institutional_quant.ml import WalkForwardModel
+from institutional_quant.ml import ModelSelection, WalkForwardModel
 from institutional_quant.portfolio import PortfolioOptimizer
 from institutional_quant.schemas import (
     BacktestResult,
@@ -167,6 +167,13 @@ def test_symbol_and_sector_are_point_in_time(tmp_path) -> None:
     assert (old.ticker, old.sector) == ("OLD", "Energy")
     assert (new.ticker, new.sector) == ("NEW", "Technology")
 
+    cached_engine = FactorEngine(store)
+    cached_engine.preload()
+    cached_old = cached_engine._universe(date(2020, 6, 1)).iloc[0]
+    cached_new = cached_engine._universe(date(2024, 6, 1)).iloc[0]
+    assert (cached_old.ticker, cached_old.sector) == (old.ticker, old.sector)
+    assert (cached_new.ticker, cached_new.sector) == (new.ticker, new.sector)
+
 
 def test_duckdb_migrates_fundamental_primary_key_without_losing_rows(tmp_path) -> None:
     import duckdb
@@ -271,11 +278,13 @@ def test_current_snapshot_metrics_are_not_visible_before_their_as_of_date(tmp_pa
         ),
     )
     engine = FactorEngine(store)
+    engine.preload()
 
     before, _ = engine._latest_metrics("fundamentals", date(2026, 8, 31))
     on_date, _ = engine._latest_metrics("fundamentals", date(2026, 9, 1))
 
     assert before.empty
+    assert list(before.columns) == ["company_id"]
     assert on_date.iloc[0]["revenue"] == pytest.approx(100.0)
 
 
@@ -309,6 +318,40 @@ def test_factor_score_requires_institutional_and_total_family_coverage() -> None
     assert scored.iloc[1]["factor_score"] == pytest.approx(0.375)
 
 
+def test_factor_persistence_skips_rows_without_a_valid_factor_score(tmp_path) -> None:
+    store = DuckDBStore(tmp_path / "factor-persistence.duckdb")
+    store.initialize()
+    frame = pd.DataFrame(
+        [
+            {
+                "company_id": "C1",
+                "ticker": "ONE",
+                "as_of_date": date(2021, 8, 31),
+                "sector": "Technology",
+                "factor_score": np.nan,
+                "source_snapshot_hash": "early",
+            },
+            {
+                "company_id": "C2",
+                "ticker": "TWO",
+                "as_of_date": date(2021, 9, 30),
+                "sector": "Industrials",
+                "factor_score": 0.25,
+                "source_snapshot_hash": "eligible",
+            },
+        ]
+    )
+
+    FactorEngine(store).persist(frame)
+
+    persisted = store.query_df(
+        "SELECT company_id, factor_score FROM factor_observations ORDER BY company_id"
+    )
+    assert persisted.to_dict(orient="records") == [
+        {"company_id": "C2", "factor_score": pytest.approx(0.25)}
+    ]
+
+
 def test_walk_forward_rejects_same_month_training() -> None:
     history = pd.DataFrame(
         {
@@ -321,6 +364,55 @@ def test_walk_forward_rejects_same_month_training() -> None:
     current = pd.DataFrame({"as_of_date": [date(2024, 1, 31)], "x": [2.0], "factor_score": [0.0]})
     with pytest.raises(ValueError, match="strictly precede"):
         WalkForwardModel().predict(history, current, ["x"])
+
+
+def test_walk_forward_selects_only_features_observed_in_the_historical_window() -> None:
+    history = pd.DataFrame(
+        {
+            "as_of_date": [date(2023, month, 28) for month in range(1, 7)],
+            "observed": np.arange(6, dtype=float),
+            "future_only": [np.nan] * 6,
+            "next_month_excess_return": np.linspace(-0.02, 0.03, 6),
+        }
+    )
+
+    selection = WalkForwardModel(validation_months=6)._select(
+        history, ["observed", "future_only"], "next_month_excess_return"
+    )
+
+    assert selection.feature_columns == ("observed",)
+
+
+def test_walk_forward_refreshes_hyperparameters_once_per_calendar_year() -> None:
+    class CountingModel(WalkForwardModel):
+        def __init__(self) -> None:
+            super().__init__(min_training_months=1, validation_months=1)
+            self.selection_calls = 0
+
+        def _select(self, train, features, target):
+            self.selection_calls += 1
+            return ModelSelection(
+                {"alpha": 0.01, "l1_ratio": 0.5},
+                {"learning_rate": 0.05, "max_leaf_nodes": 7},
+                None,
+                None,
+                tuple(features),
+            )
+
+    history = pd.DataFrame(
+        {
+            "as_of_date": [date(2023, month, 28) for month in range(1, 7)] * 20,
+            "x": np.tile(np.arange(20, dtype=float), 6),
+            "factor_score": np.linspace(-1, 1, 120),
+            "next_month_excess_return": np.linspace(-0.03, 0.04, 120),
+        }
+    )
+    model = CountingModel()
+    for current_date in (date(2024, 1, 31), date(2024, 2, 29), date(2025, 1, 31)):
+        current = pd.DataFrame({"as_of_date": [current_date], "x": [1.0], "factor_score": [0.2]})
+        model.predict(history, current, ["x"])
+
+    assert model.selection_calls == 2
 
 
 def test_backtest_returns_remain_continuous_across_ticker_change(tmp_path) -> None:

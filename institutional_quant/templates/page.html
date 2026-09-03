@@ -4,10 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Institutional Quant</title>
+  <!-- Tabler UI kit (MIT): https://github.com/tabler/tabler -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css">
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
 </head>
-<body>
-  <aside class="sidebar">
+<body class="layout-fluid">
+  <aside class="sidebar navbar navbar-vertical navbar-expand-lg">
     <div class="brand"><span>IQ</span><div>Institutional<br>Quant</div></div>
     <nav>
       {% for href, key, label in [
@@ -15,7 +17,7 @@
         ('/research-runs','research-runs','Research Runs'),('/debate','debate','Debate'),
         ('/portfolio','portfolio','Portfolio'),('/backtest','backtest','Backtest'),
         ('/paper-trading','paper-trading','Paper Trading')] %}
-      <a href="{{ href }}" class="{% if slug == key %}active{% endif %}">{{ label }}</a>
+      <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
       {% endfor %}
     </nav>
     <div class="sidebar-note"><span class="dot"></span> Local app<br><small>Supabase · Alpaca paper only</small></div>
@@ -23,7 +25,7 @@
   <main>
     <header>
       <div><p class="eyebrow">S&amp;P 500 RESEARCH SYSTEM</p><h1>{{ slug|replace('-', ' ')|title }}</h1></div>
-      <div class="badges"><span>{{ database_backend|upper }}</span><span class="safe">PAPER ONLY</span></div>
+      <div class="badges"><span class="badge bg-blue-lt">{{ database_backend|upper }}</span><span class="badge bg-green-lt safe">PAPER ONLY</span></div>
     </header>
 
     {% if slug == 'data-status' %}
@@ -38,7 +40,7 @@
       <article><p>Execution</p><strong>Paper</strong><small>Live orders disabled by design</small></article>
     </section>
     <section class="panel"><div class="panel-title"><h2>Source provenance</h2><span>Capital IQ exports</span></div>
-      <table><thead><tr><th>Dataset</th><th>Files</th><th>Rows</th><th>Latest import</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>Dataset</th><th>Files</th><th>Rows</th><th>Latest import</th></tr></thead><tbody>
       {% for row in sources %}<tr><td>{{ row.dataset }}</td><td>{{ row.files }}</td><td>{{ row.rows }}</td><td>{{ row.latest_import }}</td></tr>
       {% else %}<tr><td colspan="4" class="empty">No licensed exports imported yet.</td></tr>{% endfor %}
       </tbody></table>
@@ -57,7 +59,7 @@
         <label>Capital IQ CSV/XLSX<input name="file" type="file" accept=".csv,.xlsx,.xls" required></label>
         <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"></label>
         <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"></label>
-        <button type="submit">Validate and import</button>
+        <button class="btn btn-primary" type="submit">Validate and import</button>
       </form>
       <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>
     </section>
@@ -76,7 +78,7 @@
     </section>
     {% endif %}
     <section class="panel"><div class="panel-title"><h2>Latest sector-neutral ranking</h2><span>Value · Quality · Growth · Revisions · Momentum · Low risk</span></div>
-      <table><thead><tr><th>Rank</th><th>Ticker</th><th>Sector</th><th>Composite score</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>Rank</th><th>Ticker</th><th>Sector</th><th>Composite score</th></tr></thead><tbody>
       {% for row in factors %}<tr><td>{{ loop.index }}</td><td><b>{{ row.ticker }}</b></td><td>{{ row.sector }}</td><td>{{ '%.3f'|format(row.factor_score) }}</td></tr>
       {% else %}<tr><td colspan="4" class="empty">Import membership, fundamentals, estimates and prices to populate the Factor Lab.</td></tr>{% endfor %}
       </tbody></table>
@@ -84,13 +86,13 @@
 
     {% elif slug == 'research-runs' %}
     <section class="panel"><div class="panel-title"><h2>Research jobs</h2><span>Evidence packets and model fingerprints</span></div>
-      <table><thead><tr><th>Run ID</th><th>As of</th><th>Created</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>Run ID</th><th>As of</th><th>Created</th></tr></thead><tbody>
       {% for row in research_runs %}<tr><td class="mono">{{ row.run_id }}</td><td>{{ row.as_of_date }}</td><td>{{ row.created_at }}</td></tr>
       {% else %}<tr><td colspan="3" class="empty">No research runs yet.</td></tr>{% endfor %}
       </tbody></table>
     </section>
     <section class="panel"><div class="panel-title"><h2>Model benchmark</h2><span>Quality first</span></div>
-      <table><thead><tr><th>Model</th><th>Reasoning</th><th>Schema</th><th>Evidence</th><th>Stability</th><th>Selected</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>Model</th><th>Reasoning</th><th>Schema</th><th>Evidence</th><th>Stability</th><th>Selected</th></tr></thead><tbody>
       {% for row in benchmarks %}<tr><td>{{ row.model }}</td><td>{{ row.reasoning_effort }}</td><td>{{ '%.1f%%'|format(row.schema_success_rate*100) }}</td><td>{{ '%.1f%%'|format(row.evidence_coverage*100) }}</td><td>{{ '%.1f%%'|format(row.rating_stability*100) }}</td><td>{{ row.selected_for|title if row.selected_for else 'No' }}</td></tr>
       {% else %}<tr><td colspan="6" class="empty">No frozen model benchmark completed.</td></tr>{% endfor %}
       </tbody></table>
@@ -112,7 +114,7 @@
       <article><p>Turnover</p><strong>{{ '%.1f%%'|format(portfolio.one_way_turnover*100) if portfolio else '—' }}</strong><small>One way</small></article>
     </section>
     <section class="panel"><div class="panel-title"><h2>Current recommendation</h2><span>Max 5% per name</span></div>
-      <table><thead><tr><th>Ticker</th><th>Sector</th><th>Weight</th><th>Score</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>Ticker</th><th>Sector</th><th>Weight</th><th>Score</th></tr></thead><tbody>
       {% if portfolio %}{% for row in portfolio.positions %}<tr><td><b>{{ row.ticker }}</b></td><td>{{ row.sector }}</td><td>{{ '%.2f%%'|format(row.weight*100) }}</td><td>{{ '%.3f'|format(row.score) }}</td></tr>{% endfor %}
       {% else %}<tr><td colspan="4" class="empty">No portfolio recommendation exists.</td></tr>{% endif %}
       </tbody></table>
@@ -123,7 +125,7 @@
       {% if chart %}<div class="chart">{{ chart|safe }}</div>{% else %}<div class="empty large">Run a point-in-time backtest to populate this chart.</div>{% endif %}
     </section>
     <section class="panel"><div class="panel-title"><h2>Completed studies</h2><span>No performance target is forced</span></div>
-      <table><thead><tr><th>ID</th><th>Window</th><th>Cost</th><th>Certified</th></tr></thead><tbody>
+      <table class="table table-vcenter"><thead><tr><th>ID</th><th>Window</th><th>Cost</th><th>Certified</th></tr></thead><tbody>
       {% for row in backtests %}<tr><td class="mono">{{ row.backtest_id }}</td><td>{{ row.spec.start_date }} → {{ row.spec.end_date }}</td><td>{{ row.spec.transaction_cost_bps }} bps</td><td>{{ row.certified_point_in_time }}</td></tr>
       {% else %}<tr><td colspan="4" class="empty">No completed backtests.</td></tr>{% endfor %}
       </tbody></table>
@@ -156,5 +158,6 @@
     });
   </script>
   {% endif %}
+  <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/js/tabler.min.js" defer></script>
 </body>
 </html>
