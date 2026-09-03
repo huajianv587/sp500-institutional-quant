@@ -189,12 +189,16 @@ async def run_monthly(store: Store, settings: Settings, as_of_date: date | None 
     selected = ranked.head(10)
     builder = EvidencePacketBuilder(store)
     graph = ResearchGraph(store, settings)
-    cases: list[dict[str, Any]] = []
-    for row in selected.itertuples(index=False):
+    async def run_case(row: Any) -> dict[str, Any]:
         packet = builder.build(str(row.company_id), cutoff, float(getattr(row, "ml_score", 0.0)))
         decision = await graph.run(packet, with_debate=True)
         store.save_consensus(decision)
-        cases.append({"packet": packet.model_dump(mode="json"), "decision": decision.model_dump(mode="json")})
+        return {"packet": packet.model_dump(mode="json"), "decision": decision.model_dump(mode="json")}
+
+    # Cases are independent evidence packets.  Running them concurrently keeps
+    # a ten-name monthly committee practical while each case still has its own
+    # immutable cache key and provenance record.
+    cases = list(await asyncio.gather(*(run_case(row) for row in selected.itertuples(index=False))))
     decisions = [case["decision"] for case in cases]
     from .api import _build_portfolio  # local import avoids a module cycle
     recommendation = await asyncio.to_thread(_build_portfolio, store, cutoff, decisions)
