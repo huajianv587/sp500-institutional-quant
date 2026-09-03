@@ -189,9 +189,11 @@ async def run_monthly(store: Store, settings: Settings, as_of_date: date | None 
     selected = ranked.head(10)
     builder = EvidencePacketBuilder(store)
     graph = ResearchGraph(store, settings)
+    semaphore = asyncio.Semaphore(2)
     async def run_case(row: Any) -> dict[str, Any]:
         packet = builder.build(str(row.company_id), cutoff, float(getattr(row, "ml_score", 0.0)))
-        decision = await graph.run(packet, with_debate=True)
+        async with semaphore:
+            decision = await graph.run(packet, with_debate=True)
         store.save_consensus(decision)
         return {"packet": packet.model_dump(mode="json"), "decision": decision.model_dump(mode="json")}
 
