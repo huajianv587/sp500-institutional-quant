@@ -6,25 +6,30 @@
   <title>Institutional Quant</title>
   <!-- Tabler UI kit (MIT): https://github.com/tabler/tabler -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css">
-  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v=20260903">
 </head>
 <body class="layout-fluid">
   <aside class="sidebar navbar navbar-vertical navbar-expand-lg">
     <div class="brand"><span>IQ</span><div>Institutional<br>Quant</div></div>
     <nav>
+      <div class="nav-section-label">Research</div>
       {% for href, key, label in [
         ('/data-status','data-status','Data Status'),('/factor-lab','factor-lab','Factor Lab'),
-        ('/research-runs','research-runs','Research Runs'),('/debate','debate','Debate'),
+        ('/research-runs','research-runs','Research Runs'),('/debate','debate','Debate')] %}
+        <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
+      {% endfor %}
+      <div class="nav-section-label nav-section-spacer">Portfolio</div>
+      {% for href, key, label in [
         ('/portfolio','portfolio','Portfolio'),('/backtest','backtest','Backtest'),
         ('/paper-trading','paper-trading','Paper Trading')] %}
-      <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
+        <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
       {% endfor %}
     </nav>
     <div class="sidebar-note"><span class="dot"></span> Local app<br><small>Supabase · Alpaca paper only</small></div>
   </aside>
   <main>
     <header>
-      <div><p class="eyebrow">S&amp;P 500 RESEARCH SYSTEM</p><h1>{{ slug|replace('-', ' ')|title }}</h1></div>
+      <div><p class="eyebrow">S&amp;P 500 RESEARCH SYSTEM</p><h1>{{ slug|replace('-', ' ')|title }}</h1><p class="page-context">Point-in-time data · deterministic signals · paper-only execution</p></div>
       <div class="badges"><span class="badge bg-blue-lt">{{ database_backend|upper }}</span><span class="badge bg-green-lt safe">PAPER ONLY</span></div>
     </header>
 
