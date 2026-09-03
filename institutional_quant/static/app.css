@@ -199,6 +199,8 @@ tr:last-child td { border-bottom: 0; }
 .warning { border: 1px solid #fedf89; background: var(--warning-soft); }
 .warning b { color: var(--warning); }
 .warning p { margin: 5px 0 0; color: #7a2e0e; }
+.portfolio-held { margin-top: 20px; }
+.portfolio-next { margin-top: 12px !important; }
 .compact-list { margin: 8px 0 0; padding-left: 20px; color: #7a2e0e; }
 .issue { display: flex; gap: 18px; padding: 13px 20px; border-bottom: 1px solid #f0f2f5; }
 .issue b { flex: 0 0 260px; color: #344054; overflow-wrap: anywhere; }

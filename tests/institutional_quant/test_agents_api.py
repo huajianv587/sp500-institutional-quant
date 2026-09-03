@@ -27,6 +27,8 @@ from institutional_quant.schemas import (
     EvidenceItem,
     EvidencePacket,
     PaperTarget,
+    PortfolioPosition,
+    PortfolioRecommendation,
     Rating,
 )
 from institutional_quant.storage import DuckDBStore
@@ -294,6 +296,40 @@ def test_current_market_returns_upload_infers_missing_snapshot_timestamps(tmp_pa
 
     assert response.status_code == 200
     assert response.json()["imported_rows"] == 1
+
+
+def test_held_portfolio_is_rendered_as_reference_not_a_trade_recommendation(tmp_path) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-portfolio.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+    )
+    with TestClient(create_app(settings)) as client:
+        client.app.state.store.save_portfolio(
+            PortfolioRecommendation(
+                as_of_date=date(2026, 9, 3),
+                cadence="weekly",
+                one_way_turnover=0.0,
+                status="held",
+                warnings=["Optimizer infeasible; previous target retained."],
+                positions=[
+                    PortfolioPosition(
+                        company_id="C1",
+                        ticker="ONE",
+                        sector="Unknown",
+                        weight=0.05,
+                        score=0.0,
+                    )
+                ],
+            )
+        )
+        page = client.get("/portfolio")
+
+    assert page.status_code == 200
+    assert "No new portfolio action is recommended" in page.text
+    assert "Prior model target (reference only)" in page.text
+    assert "Not recalculated" in page.text
 
 
 def test_alpaca_preview_requires_unchanged_explicit_approval() -> None:

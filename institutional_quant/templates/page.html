@@ -171,14 +171,22 @@
 
     {% elif slug == 'portfolio' %}
     <section class="grid stats">
-      <article><p>Status</p><strong>{{ portfolio.status|title if portfolio else 'Empty' }}</strong><small>Deterministic optimizer</small></article>
-      <article><p>Holdings</p><strong>{{ portfolio.positions|length if portfolio else 0 }}</strong><small>Target range 20–30</small></article>
+      <article><p>Status</p><strong>{{ portfolio.status|title if portfolio else 'Empty' }}</strong><small>{{ 'No new trade instruction' if portfolio and portfolio.status == 'held' else 'Deterministic optimizer' }}</small></article>
+      <article><p>{{ 'Prior targets' if portfolio and portfolio.status == 'held' else 'Holdings' }}</p><strong>{{ portfolio.positions|length if portfolio else 0 }}</strong><small>{{ 'Reference only, not Alpaca holdings' if portfolio and portfolio.status == 'held' else 'Target range 20–30' }}</small></article>
       <article><p>Target volatility</p><strong>{{ '%.0f%%'|format(portfolio.target_volatility*100) if portfolio else '12%' }}</strong><small>Annualized</small></article>
       <article><p>Turnover</p><strong>{{ '%.1f%%'|format(portfolio.one_way_turnover*100) if portfolio else '—' }}</strong><small>One way</small></article>
     </section>
-    <section class="panel"><div class="panel-title"><h2>Current recommendation</h2><span>Max 5% per name</span></div>
+    {% if portfolio and portfolio.status == 'held' %}
+    <section class="warning portfolio-held">
+      <b>No new portfolio action is recommended</b>
+      <p>The optimizer retained the previous model target because it could not satisfy the active risk, sector and turnover constraints. No paper order was created and this is not a view of Alpaca account holdings.</p>
+      {% if portfolio.warnings %}<ul class="compact-list">{% for warning in portfolio.warnings %}<li>{{ warning }}</li>{% endfor %}</ul>{% endif %}
+      <p class="portfolio-next"><b>Next step:</b> refresh the latest Capital IQ fundamentals and estimates, then run monthly research to produce a new target portfolio.</p>
+    </section>
+    {% endif %}
+    <section class="panel"><div class="panel-title"><h2>{{ 'Prior model target (reference only)' if portfolio and portfolio.status == 'held' else 'Current recommendation' }}</h2><span>{{ 'No new scores calculated' if portfolio and portfolio.status == 'held' else 'Max 5% per name' }}</span></div>
       <table class="table table-vcenter"><thead><tr><th>Ticker</th><th>Sector</th><th>Weight</th><th>Score</th></tr></thead><tbody>
-      {% if portfolio %}{% for row in portfolio.positions %}<tr><td><b>{{ row.ticker }}</b></td><td>{{ row.sector }}</td><td>{{ '%.2f%%'|format(row.weight*100) }}</td><td>{{ '%.3f'|format(row.score) }}</td></tr>{% endfor %}
+      {% if portfolio %}{% for row in portfolio.positions %}<tr><td><b>{{ row.ticker }}</b></td><td>{{ 'Not available' if portfolio.status == 'held' and row.sector == 'Unknown' else row.sector }}</td><td>{{ '%.2f%%'|format(row.weight*100) }}</td><td>{{ 'Not recalculated' if portfolio.status == 'held' and row.score == 0 else '%.3f'|format(row.score) }}</td></tr>{% endfor %}
       {% else %}<tr><td colspan="4" class="empty">No portfolio recommendation exists.</td></tr>{% endif %}
       </tbody></table>
     </section>
