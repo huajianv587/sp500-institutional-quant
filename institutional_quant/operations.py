@@ -237,5 +237,5 @@ async def run_full_cycle(store: Store, settings: Settings, client: AlpacaPaperCl
         operation_id=f"full-cycle-{cutoff.isoformat()}", cadence="full-cycle", as_of_date=cutoff,
         status="awaiting_approval" if order["previews"] else "completed",
         message="Daily → weekly → monthly → paper preview completed; explicit approval is required before submission.",
-        result={"daily": daily.model_dump(mode="json"), "weekly": weekly.model_dump(mode="json"), "monthly": monthly.model_dump(mode="json"), "paper_order": order, "submitted_orders": submitted, "fill_sync": fill_sync, "approval_required": bool(order["previews"])},
+        result={"daily": daily.model_dump(mode="json"), "weekly": weekly.model_dump(mode="json"), "monthly": monthly.model_dump(mode="json"), "paper_order": order, "submitted_orders": submitted, "fill_sync": fill_sync, "approval_required": bool(order["previews"]), "submit_requested_but_deferred": bool(submit_paper_order)},
     )
