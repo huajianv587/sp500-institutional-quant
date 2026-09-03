@@ -11,6 +11,7 @@ import asyncio
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
+import httpx
 import pandas as pd
 
 from .agents import EvidencePacketBuilder, ResearchGraph
@@ -133,7 +134,16 @@ async def run_daily(
 ) -> OperationResult:
     cutoff = _cutoff(store, as_of_date)
     ranked = _rank_snapshot(store, cutoff)
-    paper_sync = await client.synchronize() if client is not None else None
+    paper_sync = None
+    if client is not None:
+        try:
+            paper_sync = await client.synchronize()
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            paper_sync = {
+                "paper_only": True,
+                "status": "pending_retry",
+                "message": f"Alpaca paper synchronization is temporarily unavailable: {type(exc).__name__}",
+            }
     return OperationResult(
         operation_id=f"daily-{cutoff.isoformat()}",
         cadence="daily",
@@ -232,7 +242,14 @@ async def run_full_cycle(store: Store, settings: Settings, client: AlpacaPaperCl
     # checkpoint.  This prevents an asynchronous job from placing an order
     # merely because a request body contained a boolean flag.
     submitted: list[dict[str, Any]] = []
-    fill_sync = await client.synchronize()
+    try:
+        fill_sync = await client.synchronize()
+    except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+        fill_sync = {
+            "paper_only": True,
+            "status": "pending_retry",
+            "message": f"Alpaca paper synchronization is temporarily unavailable: {type(exc).__name__}",
+        }
     return OperationResult(
         operation_id=f"full-cycle-{cutoff.isoformat()}", cadence="full-cycle", as_of_date=cutoff,
         status="awaiting_approval" if order["previews"] else "completed",

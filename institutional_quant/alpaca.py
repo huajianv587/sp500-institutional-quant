@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -26,17 +27,22 @@ class AlpacaPaperClient:
             "APCA-API-SECRET-KEY": self.settings.alpaca_paper_secret,
         }
 
+    @staticmethod
+    def _timeout() -> httpx.Timeout:
+        """Keep broker telemetry from blocking an otherwise local workflow."""
+        return httpx.Timeout(8.0, connect=5.0)
+
     async def preview(self, targets: list[PaperTarget]) -> list[PaperOrderPreview]:
         headers = self._headers()
         async with httpx.AsyncClient(
             base_url=self.settings.alpaca_paper_base_url,
             headers=headers,
-            timeout=30,
+            timeout=self._timeout(),
             transport=self.transport,
         ) as trading:
-            account_response, positions_response = (
-                await trading.get("/v2/account"),
-                await trading.get("/v2/positions"),
+            account_response, positions_response = await asyncio.gather(
+                trading.get("/v2/account"),
+                trading.get("/v2/positions"),
             )
             account_response.raise_for_status()
             positions_response.raise_for_status()
@@ -46,7 +52,7 @@ class AlpacaPaperClient:
         async with httpx.AsyncClient(
             base_url=self.settings.alpaca_data_base_url,
             headers=headers,
-            timeout=30,
+            timeout=self._timeout(),
             transport=self.transport,
         ) as market:
             response = await market.get(
@@ -95,7 +101,7 @@ class AlpacaPaperClient:
         async with httpx.AsyncClient(
             base_url=self.settings.alpaca_paper_base_url,
             headers=self._headers(),
-            timeout=30,
+            timeout=self._timeout(),
             transport=self.transport,
         ) as client:
             for order in orders:
@@ -119,11 +125,13 @@ class AlpacaPaperClient:
         """Read the actual paper account, positions and recent order/fill states."""
         async with httpx.AsyncClient(
             base_url=self.settings.alpaca_paper_base_url,
-            headers=self._headers(), timeout=30, transport=self.transport,
+            headers=self._headers(), timeout=self._timeout(), transport=self.transport,
         ) as client:
-            account = await client.get("/v2/account")
-            positions = await client.get("/v2/positions")
-            orders = await client.get("/v2/orders", params={"status": "all", "limit": 50})
+            account, positions, orders = await asyncio.gather(
+                client.get("/v2/account"),
+                client.get("/v2/positions"),
+                client.get("/v2/orders", params={"status": "all", "limit": 50}),
+            )
             for response in (account, positions, orders):
                 response.raise_for_status()
         safe_account = {key: account.json().get(key) for key in (

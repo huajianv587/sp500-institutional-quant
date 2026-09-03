@@ -240,21 +240,33 @@
       button.addEventListener('click', async () => {
         const result = document.getElementById('operation-result');
         const cadence = button.dataset.cadence;
-        result.textContent = `Starting ${cadence} workflow…`;
+        result.textContent = `Starting ${cadence} workflow. This page stays responsive while the task runs.`;
+        result.className = 'import-result';
         try {
-            const response = await fetch(`/api/v1/operations/${cadence}`, {
+          const response = await fetch(`/api/v1/operations/${cadence}`, {
             method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({submit_paper_order: false})
           });
           const job = await response.json();
-          result.textContent = JSON.stringify(job, null, 2);
+          if (!response.ok) throw new Error(job.detail || 'Unable to start the workflow.');
+          result.textContent = `${cadence[0].toUpperCase() + cadence.slice(1)} workflow queued. The result will appear here when ready.`;
           if (job.job_id) {
             const poll = setInterval(async () => {
               const status = await fetch(`/api/v1/jobs/${job.job_id}`).then((r) => r.json());
-              result.textContent = JSON.stringify(status, null, 2);
-              if (['succeeded','failed'].includes(status.status)) clearInterval(poll);
+              if (status.status === 'running' || status.status === 'queued') {
+                result.textContent = status.message || `${cadence} workflow is running…`;
+                return;
+              }
+              clearInterval(poll);
+              if (status.status === 'failed') {
+                result.textContent = `Workflow stopped: ${status.error || status.message}. Your existing portfolio and paper orders were not changed.`;
+                result.className = 'import-result failed';
+                return;
+              }
+              result.textContent = `${cadence[0].toUpperCase() + cadence.slice(1)} workflow completed. Review the relevant research, portfolio, or paper-trading page for the decision details.`;
+              result.className = 'import-result ok';
             }, 1200);
           }
-        } catch (error) { result.textContent = String(error); }
+        } catch (error) { result.textContent = String(error); result.className = 'import-result failed'; }
       });
     });
   </script>
@@ -269,19 +281,32 @@
       const payload = await response.json();
       demoOrders = payload.previews || [];
       document.getElementById('demo-submit').disabled = !response.ok || demoOrders.length === 0;
-      paperResult.textContent = JSON.stringify(payload, null, 2);
+      if (!response.ok) { paperResult.textContent = `Preview unavailable: ${payload.detail || 'request failed'}.`; paperResult.className = 'import-result failed'; return; }
+      const order = demoOrders[0];
+      paperResult.textContent = order
+        ? `Paper-only preview ready: ${order.side.toUpperCase()} ${order.qty} share of ${order.symbol} at an estimated $${order.estimated_price.toFixed(2)} ($${order.estimated_notional.toFixed(2)}). This preview expires at ${new Date(order.expires_at).toLocaleTimeString()}. Inspect it before approving.`
+        : 'No eligible paper-order preview is available.';
+      paperResult.className = order ? 'import-result ok' : 'import-result failed';
     });
     document.getElementById('demo-submit').addEventListener('click', async () => {
       if (!demoOrders.length || !window.confirm('Submit this unchanged one-share paper preview?')) return;
       paperResult.textContent = 'Submitting the approved paper-only order…';
       const response = await fetch('/api/v1/paper/orders/submit', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({approved: true, orders: demoOrders})});
-      paperResult.textContent = JSON.stringify(await response.json(), null, 2);
+      const payload = await response.json();
+      paperResult.textContent = response.ok
+        ? `Paper-only order submitted. Alpaca order ID: ${payload[0]?.id || 'received'}. Use Synchronize paper fills to check its status.`
+        : `Paper order was not submitted: ${payload.detail || 'request failed'}.`;
+      paperResult.className = response.ok ? 'import-result ok' : 'import-result failed';
       document.getElementById('demo-submit').disabled = true;
     });
     document.getElementById('demo-sync').addEventListener('click', async () => {
       paperResult.textContent = 'Synchronizing paper account, orders and fills…';
       const response = await fetch('/api/v1/paper/sync');
-      paperResult.textContent = JSON.stringify(await response.json(), null, 2);
+      const payload = await response.json();
+      paperResult.textContent = response.ok
+        ? `Paper account synchronized: equity $${Number(payload.account?.equity || 0).toLocaleString()}, ${payload.positions?.length || 0} positions, ${payload.filled_orders?.length || 0} filled orders in the returned history.`
+        : `Paper synchronization is unavailable: ${payload.detail || 'request failed'}.`;
+      paperResult.className = response.ok ? 'import-result ok' : 'import-result failed';
     });
   </script>
   {% endif %}
