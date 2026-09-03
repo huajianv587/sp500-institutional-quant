@@ -1015,7 +1015,7 @@ class CapitalIQImporter:
             if dataset not in allowed_current:
                 raise ValueError(
                     "Current-snapshot timestamps are permitted only for instruments, "
-                    "fundamentals, and estimates"
+                    "fundamentals, estimates, and market_returns"
                 )
             if current_snapshot_as_of is None or current_snapshot_effective_at is None:
                 raise ValueError(

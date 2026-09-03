@@ -62,7 +62,7 @@
     </section>
     <section class="panel upload-panel"><div class="panel-title"><h2>Upload a Capital IQ export</h2><span>CSV/XLSX · validated before import</span></div>
       <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
-        <label>Dataset<select name="dataset" required>
+        <label>Dataset<select id="ciq-dataset" name="dataset" required>
           <option value="instruments">Instruments / current universe</option>
           <option value="index_membership">Historical S&amp;P 500 membership</option>
           <option value="fundamentals">Financial statements / fundamentals</option>
@@ -79,11 +79,11 @@
             <span id="ciq-file-name">No file selected</span>
           </span>
         </label>
-        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"></label>
-        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"></label>
+        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"><small>For a current 1D / 1W / 1M export, this can be inferred from the filename.</small></label>
+        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"><small>Confirm when the export was available. Download time is not a substitute.</small></label>
         <button class="btn btn-primary" type="submit">Validate and import</button>
       </form>
-      <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>
+      <pre id="ciq-import-result" class="import-result">Select the matching dataset. A 1D / 1W / 1M percentage snapshot belongs to market_returns; adjusted prices require historical OHLC and adjusted-close fields.</pre>
     </section>
     <section class="{% if certified %}success{% else %}warning{% endif %}">
       <b>{% if certified %}Five-year research gate passed{% else %}Five-year research gate is not ready{% endif %}</b>
@@ -202,9 +202,18 @@
   </main>
   {% if slug == 'data-status' %}
   <script>
-    document.getElementById('ciq-import-form').addEventListener('submit', async (event) => {
+    const datasetSelect = document.getElementById('ciq-dataset');
+    const importForm = document.getElementById('ciq-import-form');
+    const snapshotAsOf = importForm.querySelector('[name="current_snapshot_as_of"]');
+    const snapshotEffectiveAt = importForm.querySelector('[name="current_snapshot_effective_at"]');
+    importForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const result = document.getElementById('ciq-import-result');
+      if (datasetSelect.value === 'prices' && (snapshotAsOf.value || snapshotEffectiveAt.value)) {
+        result.textContent = 'Choose Current market returns (1D / 1W / 1M) for a percentage snapshot. Adjusted prices require historical price_date/effective_at fields.';
+        result.className = 'import-result failed';
+        return;
+      }
       result.textContent = 'Validating and importing…';
       try {
         const response = await fetch(event.currentTarget.action, {
@@ -220,6 +229,11 @@
     });
     document.getElementById('ciq-file').addEventListener('change', (event) => {
       const file = event.currentTarget.files[0];
+      if (file && /returns[_-]?1d[_-]?1w[_-]?1m/i.test(file.name)) {
+        datasetSelect.value = 'market_returns';
+        const match = file.name.match(/(20\d{2})[-_](\d{2})[-_](\d{2})/);
+        if (match && !snapshotAsOf.value) snapshotAsOf.value = `${match[1]}-${match[2]}-${match[3]}`;
+      }
       document.getElementById('ciq-file-name').textContent = file ? file.name : 'No file selected';
     });
     document.querySelectorAll('.cadence-button').forEach((button) => {
