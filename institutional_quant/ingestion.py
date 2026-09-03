@@ -74,6 +74,9 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "low": ("low", "low_price"),
     "close": ("close", "close_price"),
     "adjusted_close": ("adjusted_close", "adj_close", "adjustedclose"),
+    "return_1d": ("return_1d", "return_1d_pct", "price_change_1d"),
+    "return_1w": ("return_1w", "return_1w_pct", "price_change_1w"),
+    "return_1m": ("return_1m", "return_1m_pct", "price_change_1m"),
     "volume": ("volume", "trading_volume"),
     "source": ("source", "price_source"),
     "institutional_pct": ("institutional_pct", "institutional_ownership_pct"),
@@ -252,6 +255,13 @@ CONTRACTS: dict[DatasetKind, Contract] = {
         date_columns=("price_date", "as_of_date"),
         defaults={"source": "capital_iq"},
     ),
+    DatasetKind.MARKET_RETURNS: Contract(
+        "market_returns",
+        ("company_id", "ticker", "as_of_date", "effective_at", "return_1d", "return_1w", "return_1m"),
+        (),
+        date_columns=("as_of_date",),
+        datetime_columns=("effective_at",),
+    ),
     DatasetKind.OWNERSHIP: Contract(
         "ownership",
         ("company_id", "ticker", "effective_at", "as_of_date"),
@@ -337,6 +347,17 @@ TABLE_COLUMNS: dict[str, list[str]] = {
         "source",
         "effective_at",
         "as_of_date",
+        "source_file_id",
+        "ingested_at",
+    ],
+    "market_returns": [
+        "company_id",
+        "ticker",
+        "as_of_date",
+        "effective_at",
+        "return_1d",
+        "return_1w",
+        "return_1m",
         "source_file_id",
         "ingested_at",
     ],
@@ -571,6 +592,33 @@ class CapitalIQImporter:
                 if alias in keyed:
                     renames[keyed[alias]] = canonical
                     break
+        return frame.rename(columns=renames)
+
+    @staticmethod
+    def _rename_market_return_columns(frame: pd.DataFrame) -> pd.DataFrame:
+        """Map CIQ's repeated ``SP_PRICE_CHANGE`` columns by exported order.
+
+        pandas disambiguates duplicate workbook headers with ``.1``/``.2``;
+        positional mapping is therefore the only stable interpretation of the
+        1D, 1W and 1M columns in a Results As Values export.
+        """
+        columns = list(frame.columns)
+        candidates = [
+            column
+            for column in columns
+            if _column_key(column).startswith("price_change")
+            or _column_key(column).startswith("sp_price_change")
+        ]
+        if len(candidates) < 3:
+            # Some CSV exports retain the keyfield labels as headers.
+            candidates = [column for column in columns if "price_change" in _column_key(column)]
+        if len(candidates) < 3:
+            return frame
+        renames = {
+            candidates[0]: "return_1d",
+            candidates[1]: "return_1w",
+            candidates[2]: "return_1m",
+        }
         return frame.rename(columns=renames)
 
     @staticmethod
@@ -962,6 +1010,7 @@ class CapitalIQImporter:
                 DatasetKind.INSTRUMENTS,
                 DatasetKind.FUNDAMENTALS,
                 DatasetKind.ESTIMATES,
+                DatasetKind.MARKET_RETURNS,
             }
             if dataset not in allowed_current:
                 raise ValueError(
@@ -1021,8 +1070,15 @@ class CapitalIQImporter:
                 date_only_availability = True
                 source_metadata["effective_at_granularity"] = "date"
                 source_metadata["date_only_availability_policy"] = "end_of_day"
+        if dataset is DatasetKind.MARKET_RETURNS:
+            frame = self._rename_market_return_columns(frame)
         frame = self._rename_columns(frame)
         frame = self._normalize_identifiers(frame)
+        if dataset is DatasetKind.MARKET_RETURNS and {"company_id", "ticker"}.issubset(frame.columns):
+            # Results As Values places Current/1D/1W/1M parameter rows directly
+            # below the keyfield row; they are not observations and should not
+            # become fatal timestamp errors.
+            frame = frame.loc[frame["company_id"].notna() & frame["ticker"].notna()].copy()
         frame, parameter_rows_dropped = self._drop_parameter_rows(frame)
         if (
             current_snapshot
@@ -1145,6 +1201,9 @@ class CapitalIQImporter:
             "institutional_pct",
             "institutional_change",
             "shares",
+            "return_1d",
+            "return_1w",
+            "return_1m",
         }
         for column in numeric_columns.intersection(frame.columns):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
@@ -1157,17 +1216,23 @@ class CapitalIQImporter:
         rejected_rows = int(required_nulls.sum())
         if rejected_rows:
             value_only_missing = pd.Series(False, index=frame.index)
-            if dataset in {DatasetKind.FUNDAMENTALS, DatasetKind.ESTIMATES}:
+            if dataset in {DatasetKind.FUNDAMENTALS, DatasetKind.ESTIMATES, DatasetKind.MARKET_RETURNS}:
                 # CIQ returns a completely empty metric cell together with empty
                 # period companions when no observation exists for a company.
                 # That is ordinary cross-sectional missingness, not a malformed
                 # timestamp.  Identity/provenance must still be present, and any
                 # row with a numeric value but a missing period or availability
                 # timestamp remains a fatal point-in-time error.
-                observation_identity = ["company_id", "ticker", "as_of_date", "metric"]
-                value_only_missing = frame["value"].isna() & frame[
-                    observation_identity
-                ].notna().all(axis=1)
+                if dataset is DatasetKind.MARKET_RETURNS:
+                    observation_identity = ["company_id", "ticker", "as_of_date", "effective_at"]
+                    value_only_missing = frame[["return_1d", "return_1w", "return_1m"]].isna().all(axis=1) & frame[
+                        observation_identity
+                    ].notna().all(axis=1)
+                else:
+                    observation_identity = ["company_id", "ticker", "as_of_date", "metric"]
+                    value_only_missing = frame["value"].isna() & frame[
+                        observation_identity
+                    ].notna().all(axis=1)
             fatal_count = int((required_nulls & ~value_only_missing).sum())
             unavailable_count = int((required_nulls & value_only_missing).sum())
             if unavailable_count:

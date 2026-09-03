@@ -16,6 +16,10 @@ investment advice. Alpaca integration is paper-only.
 - FastAPI, Jinja/HTMX and Plotly UI for Data Status, Factor Lab, Research Runs, Debate, Portfolio, Backtest and Paper Trading.
 - DeepSeek structured-output routing and cache metadata; only final validated rationale is retained.
 - Alpaca paper preview/approval workflow; no live endpoint is accepted.
+- Explicit daily, weekly, monthly and full-cycle operation runners, including
+  a dedicated `market_returns` table for Capital IQ 1D/1W/1M snapshots.
+- English annotated operator guide with 19 reproducible screenshots in
+  [`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md).
 - Regression suite: **710 passed, 1 skipped** (optional Bedrock dependency absent).
 
 The current real-data case study is frozen at `output/manifests/case-study-05f56a33-8e7f-4017-be54-d411467b8edb.json` (the directory is intentionally git-ignored because it can contain licensed-data metadata). It covers 60 monthly observations from September 2021 through August 2026, with 5/10/25 bps cost sensitivity. The 10 bps ensemble produced 11.95% CAGR, 12.07% volatility, Sharpe 1.00 and −10.35% maximum drawdown; SPY produced 12.49% CAGR, 15.19% volatility, Sharpe 0.85 and −23.31% drawdown. ML-only was weaker (6.38% CAGR), so the result is reported as a risk-adjusted trade-off, not as forced alpha.
@@ -141,6 +145,22 @@ sequenceDiagram
 - **Weekly:** refresh market-risk features and permit only limited adjustments.
 - **Monthly:** import fresh Capital IQ exports, rebuild factors and ML signals,
   run the Agent debate and produce new target weights.
+
+The same cadence is available as asynchronous API jobs:
+
+```text
+POST /api/v1/operations/daily
+POST /api/v1/operations/weekly
+POST /api/v1/operations/monthly
+POST /api/v1/operations/full-cycle
+GET  /api/v1/operations/{job_id}
+```
+
+`full-cycle` ends with a paper-order preview and `awaiting_approval`; the
+separate Paper Trading page requires the operator to inspect and approve the
+unchanged preview before submitting one share. See the complete English
+procedure, screenshot set and troubleshooting notes in
+[`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md).
 
 ## Environment and quick start
 

@@ -59,8 +59,11 @@ class AlpacaPaperClient:
         for target in targets:
             symbol = target.symbol.upper()
             price = float(trades[symbol]["p"])
-            target_qty = equity * target.target_weight / price
-            delta = target_qty - positions.get(symbol, 0.0)
+            delta = (
+                float(target.quantity)
+                if target.quantity is not None
+                else equity * target.target_weight / price - positions.get(symbol, 0.0)
+            )
             if abs(delta) * price < 1.0:
                 continue
             preview = PaperOrderPreview(
@@ -111,3 +114,26 @@ class AlpacaPaperClient:
                 results.append(response.json())
                 self._previews.pop(order.preview_id, None)
         return results
+
+    async def synchronize(self) -> dict:
+        """Read the actual paper account, positions and recent order/fill states."""
+        async with httpx.AsyncClient(
+            base_url=self.settings.alpaca_paper_base_url,
+            headers=self._headers(), timeout=30, transport=self.transport,
+        ) as client:
+            account = await client.get("/v2/account")
+            positions = await client.get("/v2/positions")
+            orders = await client.get("/v2/orders", params={"status": "all", "limit": 50})
+            for response in (account, positions, orders):
+                response.raise_for_status()
+        safe_account = {key: account.json().get(key) for key in (
+            "status", "equity", "cash", "buying_power", "portfolio_value", "trading_blocked"
+        )}
+        return {
+            "paper_only": True,
+            "synchronized_at": datetime.now(timezone.utc).isoformat(),
+            "account": safe_account,
+            "positions": positions.json(),
+            "orders": orders.json(),
+            "filled_orders": [row for row in orders.json() if row.get("status") == "filled"],
+        }

@@ -263,7 +263,7 @@ def test_dashboard_and_health_use_duckdb_fixture(tmp_path) -> None:
         assert page.status_code == 200
         assert "Data Status" in page.text
         assert "Five-year research gate is not ready" in page.text
-        assert "Import a Capital IQ export" in page.text
+        assert "Upload a Capital IQ export" in page.text
         assert 'action="/api/v1/imports/ciq"' in page.text
 
 

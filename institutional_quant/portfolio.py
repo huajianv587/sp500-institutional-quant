@@ -33,6 +33,8 @@ class PortfolioOptimizer:
         benchmark_sector_weights: dict[str, float] | None = None,
         min_positions: int = 20,
         max_positions: int = 30,
+        cadence: str = "monthly",
+        turnover_limit: float | None = None,
     ) -> PortfolioRecommendation:
         current_weights = current_weights or {}
         ranked = candidates.sort_values(score_column, ascending=False).copy()
@@ -100,6 +102,9 @@ class PortfolioOptimizer:
                 ]
             )
         if current_weights:
+            effective_turnover_limit = (
+                self.monthly_turnover_limit if turnover_limit is None else turnover_limit
+            )
             outside_sales = sum(
                 weight for ticker, weight in current_weights.items() if ticker not in tickers
             )
@@ -107,7 +112,7 @@ class PortfolioOptimizer:
                 {
                     "type": "ineq",
                     "fun": lambda weights: (
-                        self.monthly_turnover_limit
+                        effective_turnover_limit
                         - 0.5 * (np.abs(weights - previous).sum() + outside_sales)
                     ),
                 }
@@ -185,6 +190,7 @@ class PortfolioOptimizer:
             )
         return PortfolioRecommendation(
             as_of_date=as_of_date,
+            cadence="weekly" if cadence == "weekly" else "monthly",
             target_volatility=self.target_volatility,
             expected_volatility=float(np.sqrt(max(variance, 0.0))),
             one_way_turnover=float(one_way_turnover),

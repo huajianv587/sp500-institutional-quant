@@ -28,6 +28,13 @@ from .config import Settings
 from .factors import FactorEngine
 from .ingestion import CapitalIQImporter, certify_point_in_time
 from .jobs import JobManager
+from .operations import (
+    prepare_one_share_order,
+    run_daily,
+    run_full_cycle,
+    run_monthly,
+    run_weekly,
+)
 from .portfolio import PortfolioOptimizer
 from .reports import write_backtest_report
 from .scheduler import OperationalScheduler
@@ -36,6 +43,7 @@ from .schemas import (
     DatasetKind,
     JobRecord,
     ModelBenchmarkRequest,
+    OperationRequest,
     PaperOrderPreviewRequest,
     PaperOrderSubmitRequest,
     ResearchRunRequest,
@@ -389,6 +397,76 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return await app.state.alpaca.submit(request.orders, request.approved)
         except (RuntimeError, ValueError, httpx.HTTPError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/paper/orders/demo-preview")
+    async def paper_demo_preview():
+        try:
+            return await prepare_one_share_order(store, settings, app.state.alpaca)
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/v1/paper/sync")
+    async def paper_sync():
+        try:
+            return await app.state.alpaca.synchronize()
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    def submit_operation(kind: str, request: OperationRequest):
+        async def work(job: JobRecord) -> str:
+            if kind == "daily":
+                result = await run_daily(store, settings, request.as_of_date, client=app.state.alpaca)
+            elif kind == "weekly":
+                result = await run_weekly(store, settings, request.as_of_date)
+            elif kind == "monthly":
+                result = await run_monthly(store, settings, request.as_of_date)
+            else:
+                result = await run_full_cycle(
+                    store,
+                    settings,
+                    app.state.alpaca,
+                    submit_paper_order=False,
+                    as_of_date=request.as_of_date,
+                )
+            job.message = result.message
+            job.progress = 1.0
+            store.upsert_job(job)
+            return json.dumps(result.model_dump(mode="json"), default=str)
+
+        return app.state.jobs.submit(f"operation_{kind}", work)
+
+    @app.post("/api/v1/operations/daily", status_code=202)
+    async def operation_daily(request: OperationRequest | None = None):
+        request = request or OperationRequest()
+        return submit_operation("daily", request)
+
+    @app.post("/api/v1/operations/weekly", status_code=202)
+    async def operation_weekly(request: OperationRequest | None = None):
+        request = request or OperationRequest()
+        return submit_operation("weekly", request)
+
+    @app.post("/api/v1/operations/monthly", status_code=202)
+    async def operation_monthly(request: OperationRequest | None = None):
+        request = request or OperationRequest()
+        return submit_operation("monthly", request)
+
+    @app.post("/api/v1/operations/full-cycle", status_code=202)
+    async def operation_full_cycle(request: OperationRequest | None = None):
+        request = request or OperationRequest()
+        return submit_operation("full-cycle", request)
+
+    @app.get("/api/v1/operations/{job_id}")
+    async def get_operation(job_id: str):
+        job = store.get_job(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="Operation not found")
+        payload = job.model_dump(mode="json")
+        if job.result_ref:
+            try:
+                payload["operation"] = json.loads(job.result_ref)
+            except json.JSONDecodeError:
+                payload["operation"] = {"result_ref": job.result_ref}
+        return payload
 
     @app.get("/api/v1/jobs/{job_id}")
     async def get_job(job_id: str):

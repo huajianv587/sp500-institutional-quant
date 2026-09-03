@@ -51,6 +51,15 @@
         <a class="guide-step" href="/portfolio"><span>04</span><div><b>Build the portfolio</b><small>Review target weights before paper trading.</small></div><strong>→</strong></a>
       </div>
     </section>
+    <section class="panel cadence-panel"><div class="panel-title"><h2>Run the operating cycle</h2><span>Daily monitor · weekly adjustment · monthly deployment</span></div>
+      <div class="cadence-actions">
+        <button class="btn btn-outline-primary cadence-button" data-cadence="daily">Run daily selection</button>
+        <button class="btn btn-outline-primary cadence-button" data-cadence="weekly">Run weekly adjustment</button>
+        <button class="btn btn-primary cadence-button" data-cadence="monthly">Run monthly research</button>
+        <button class="btn btn-outline-secondary cadence-button" data-cadence="full-cycle">Run full demonstration</button>
+      </div>
+      <pre id="operation-result" class="import-result">Operations are asynchronous. Start with a validated snapshot, then run one cadence at a time.</pre>
+    </section>
     <section class="panel upload-panel"><div class="panel-title"><h2>Upload a Capital IQ export</h2><span>CSV/XLSX · validated before import</span></div>
       <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
         <label>Dataset<select name="dataset" required>
@@ -59,6 +68,7 @@
           <option value="fundamentals">Financial statements / fundamentals</option>
           <option value="estimates">Consensus estimates / revisions</option>
           <option value="prices">Adjusted prices / corporate actions</option>
+          <option value="market_returns">Current market returns (1D / 1W / 1M)</option>
           <option value="ownership">Ownership</option>
           <option value="insider_transactions">Insider transactions</option>
         </select></label>
@@ -184,6 +194,10 @@
     <section class="panel"><div class="panel-title"><h2>Order workflow</h2><span>Preview → inspect → approve</span></div>
       <ol class="workflow"><li>Create deterministic target weights.</li><li>Preview paper-only share deltas and estimated notionals.</li><li>Approve the unchanged preview within five minutes.</li><li>Synchronize simulated fills during the daily monitor.</li></ol>
     </section>
+    <section class="panel paper-demo"><div class="panel-title"><h2>Demonstration order</h2><span>One share · highest-ranked eligible candidate</span></div>
+      <div class="cadence-actions"><button id="demo-preview" class="btn btn-primary">Preview one-share order</button><button id="demo-submit" class="btn btn-success" disabled>Approve & submit unchanged preview</button><button id="demo-sync" class="btn btn-outline-secondary">Synchronize paper fills</button></div>
+      <pre id="paper-result" class="import-result">The preview is read-only. Submit only after inspecting the unchanged preview.</pre>
+    </section>
     {% endif %}
   </main>
   {% if slug == 'data-status' %}
@@ -207,6 +221,53 @@
     document.getElementById('ciq-file').addEventListener('change', (event) => {
       const file = event.currentTarget.files[0];
       document.getElementById('ciq-file-name').textContent = file ? file.name : 'No file selected';
+    });
+    document.querySelectorAll('.cadence-button').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const result = document.getElementById('operation-result');
+        const cadence = button.dataset.cadence;
+        result.textContent = `Starting ${cadence} workflow…`;
+        try {
+            const response = await fetch(`/api/v1/operations/${cadence}`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({submit_paper_order: false})
+          });
+          const job = await response.json();
+          result.textContent = JSON.stringify(job, null, 2);
+          if (job.job_id) {
+            const poll = setInterval(async () => {
+              const status = await fetch(`/api/v1/jobs/${job.job_id}`).then((r) => r.json());
+              result.textContent = JSON.stringify(status, null, 2);
+              if (['succeeded','failed'].includes(status.status)) clearInterval(poll);
+            }, 1200);
+          }
+        } catch (error) { result.textContent = String(error); }
+      });
+    });
+  </script>
+  {% endif %}
+  {% if slug == 'paper-trading' %}
+  <script>
+    const paperResult = document.getElementById('paper-result');
+    let demoOrders = [];
+    document.getElementById('demo-preview').addEventListener('click', async () => {
+      paperResult.textContent = 'Loading candidate and requesting a paper-only preview…';
+      const response = await fetch('/api/v1/paper/orders/demo-preview', {method: 'POST'});
+      const payload = await response.json();
+      demoOrders = payload.previews || [];
+      document.getElementById('demo-submit').disabled = !response.ok || demoOrders.length === 0;
+      paperResult.textContent = JSON.stringify(payload, null, 2);
+    });
+    document.getElementById('demo-submit').addEventListener('click', async () => {
+      if (!demoOrders.length || !window.confirm('Submit this unchanged one-share paper preview?')) return;
+      paperResult.textContent = 'Submitting the approved paper-only order…';
+      const response = await fetch('/api/v1/paper/orders/submit', {method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({approved: true, orders: demoOrders})});
+      paperResult.textContent = JSON.stringify(await response.json(), null, 2);
+      document.getElementById('demo-submit').disabled = true;
+    });
+    document.getElementById('demo-sync').addEventListener('click', async () => {
+      paperResult.textContent = 'Synchronizing paper account, orders and fills…';
+      const response = await fetch('/api/v1/paper/sync');
+      paperResult.textContent = JSON.stringify(await response.json(), null, 2);
     });
   </script>
   {% endif %}

@@ -16,6 +16,7 @@ class DatasetKind(str, Enum):
     FUNDAMENTALS = "fundamentals"
     ESTIMATES = "estimates"
     PRICES = "prices"
+    MARKET_RETURNS = "market_returns"
     OWNERSHIP = "ownership"
     INSIDER_TRANSACTIONS = "insider_transactions"
 
@@ -268,6 +269,7 @@ class PaperOrderPreview(BaseModel):
 class PaperTarget(BaseModel):
     symbol: str
     target_weight: float = Field(ge=0.0, le=0.05 + 1e-8)
+    quantity: float | None = Field(default=None, gt=0.0, le=1_000_000)
 
 
 class PaperOrderPreviewRequest(BaseModel):
@@ -277,6 +279,23 @@ class PaperOrderPreviewRequest(BaseModel):
 class PaperOrderSubmitRequest(BaseModel):
     approved: bool
     orders: list[PaperOrderPreview] = Field(min_length=1)
+
+
+class OperationRequest(BaseModel):
+    """Inputs shared by the deterministic daily/weekly/monthly runners."""
+
+    as_of_date: date | None = None
+    submit_paper_order: bool = False
+    demo_order_quantity: float = Field(default=1.0, gt=0.0, le=1.0)
+
+
+class OperationResult(BaseModel):
+    operation_id: str
+    cadence: Literal["daily", "weekly", "monthly", "full-cycle"]
+    as_of_date: date
+    status: Literal["completed", "held", "awaiting_approval", "failed"]
+    message: str
+    result: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobRecord(BaseModel):

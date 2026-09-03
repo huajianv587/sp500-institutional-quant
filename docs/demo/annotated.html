@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Annotated S&amp;P 500 demonstration figures</title>
+<style>
+body{margin:0;background:#f4f7fb;color:#172236;font:16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.figure{width:1622px;margin:28px auto 56px;background:white;border:1px solid #dbe3ef;border-radius:14px;overflow:hidden;box-shadow:0 10px 30px #162b4512}
+.label{height:76px;background:#145fe8;color:#fff;display:flex;align-items:center;padding:0 32px;font-size:27px;font-weight:700;letter-spacing:.2px}
+.label span{font-size:15px;font-weight:500;opacity:.8;margin-left:18px}
+.figure img{display:block;max-width:100%;height:auto}
+</style>
+<main id="figures"></main>
+<script>
+const steps=[
+ ['01','Select the Capital IQ Companies screener','ciq-step1.png'],
+ ['02','Apply the S&amp;P 500 constituent criterion','ciq-step1.png'],
+ ['03','Add Price Change 1D / 1W / 1M columns','ciq-step1.png'],
+ ['04','Run Results As Values and export CSV/XLSX','ciq-step1.png'],
+ ['05','Select Current market returns (1D / 1W / 1M)','01-data-status.png'],
+ ['06','Choose the unchanged Capital IQ file','01-data-status.png'],
+ ['07','Enter the availability and observed timestamps','01-data-status.png'],
+ ['08','Validate and import; review provenance','01-data-status.png'],
+ ['09','Run daily selection and risk monitoring','01-data-status.png'],
+ ['10','Run weekly adjustment (5% turnover cap)','05-portfolio.png'],
+ ['11','Inspect the monthly factor snapshot','02-factor-lab.png'],
+ ['12','Start the monthly research run','03-research-runs.png'],
+ ['13','Read independent analyst debate turns','04-debate.png'],
+ ['14','Review the consensus decision and dissent','04-debate.png'],
+ ['15','Review deterministic target weights','05-portfolio.png'],
+ ['16','Preview a one-share paper order','07-paper-trading.png'],
+ ['17','Approve and submit the unchanged preview','07-paper-trading.png'],
+ ['18','Synchronize simulated fills','07-paper-trading.png'],
+ ['19','Run full-cycle; stop at approval checkpoint','01-data-status.png']
+];
+document.getElementById('figures').innerHTML=steps.map(([n,title,img])=>`<section class="figure"><div class="label">STEP ${n} — ${title}<span>English operator guide · paper-only</span></div><img src="${img}" alt="Step ${n}: ${title}"></section>`).join('');
+</script>

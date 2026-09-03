@@ -241,4 +241,8 @@ data/*.duckdb*
 tmp/
 .tmp/
 /output/**
+# Licensed Capital IQ exports stay on the operator's local volume.
+模拟数据/*.xlsx
+模拟数据/demo-*.png
+模拟数据/step-*.png
 !/output/.gitkeep

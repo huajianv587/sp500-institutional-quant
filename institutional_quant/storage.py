@@ -246,6 +246,19 @@ CREATE TABLE IF NOT EXISTS prices (
     PRIMARY KEY (company_id, price_date, source)
 );
 
+CREATE TABLE IF NOT EXISTS market_returns (
+    company_id VARCHAR NOT NULL,
+    ticker VARCHAR NOT NULL,
+    as_of_date DATE NOT NULL,
+    effective_at TIMESTAMP NOT NULL,
+    return_1d DOUBLE,
+    return_1w DOUBLE,
+    return_1m DOUBLE,
+    source_file_id VARCHAR NOT NULL,
+    ingested_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (company_id, as_of_date)
+);
+
 CREATE TABLE IF NOT EXISTS ownership (
     company_id VARCHAR NOT NULL,
     ticker VARCHAR NOT NULL,
@@ -445,6 +458,7 @@ class DuckDBStore:
             "fundamentals",
             "estimates",
             "prices",
+            "market_returns",
             "ownership",
             "insider_transactions",
             "factor_observations",
@@ -729,6 +743,7 @@ class DuckDBStore:
             "estimates": "as_of_date",
             "prices": "price_date",
             "index_membership": "as_of_date",
+            "market_returns": "as_of_date",
         }
         if table not in safe:
             raise ValueError(table)
@@ -791,6 +806,7 @@ POSTGRES_CONFLICT_KEYS: dict[str, tuple[str, ...]] = {
     ),
     "estimates": ("company_id", "fiscal_period", "effective_at", "metric"),
     "prices": ("company_id", "price_date", "source"),
+    "market_returns": ("company_id", "as_of_date"),
     "ownership": ("company_id", "effective_at"),
     "insider_transactions": (
         "company_id",
@@ -1181,6 +1197,7 @@ class SupabasePostgresStore:
             "estimates": "as_of_date",
             "prices": "price_date",
             "index_membership": "as_of_date",
+            "market_returns": "as_of_date",
         }
         if table not in safe:
             raise ValueError(table)

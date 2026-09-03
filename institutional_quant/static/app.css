@@ -167,6 +167,9 @@ details[open] summary::after { content: "−"; }
 .guide-step b { color: var(--ink); font-size: 13px; }
 .guide-step small { color: var(--muted); line-height: 1.35; }
 .guide-step strong { margin-left: auto; color: var(--subtle); font-size: 18px; font-weight: 400; }
+.cadence-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 18px 20px 0; }
+.cadence-button { min-height: 38px; border-radius: 7px; font-weight: 700; }
+.cadence-panel .import-result { margin-top: 16px; }
 .quality-panel { overflow: visible; }
 .quality-panel .panel-title { border-bottom: 0; }
 .quality-panel[open] .panel-title { border-bottom: 1px solid var(--line); }
