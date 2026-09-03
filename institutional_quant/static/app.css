@@ -169,6 +169,7 @@ details[open] summary::after { content: "−"; }
 .guide-step strong { margin-left: auto; color: var(--subtle); font-size: 18px; font-weight: 400; }
 .cadence-actions { display: flex; flex-wrap: wrap; gap: 10px; padding: 18px 20px 0; }
 .cadence-button { min-height: 38px; border-radius: 7px; font-weight: 700; }
+.cadence-button:not(.is-active):hover, .cadence-button:not(.is-active):focus { border-color: var(--accent); background: #fff; color: var(--accent); }
 .cadence-button.is-active { border-color: var(--accent); background: var(--accent); color: #fff; }
 .cadence-button.is-active:hover, .cadence-button.is-active:focus { border-color: #1d4ed8; background: #1d4ed8; color: #fff; }
 .cadence-tooltip { position: relative; }
@@ -177,6 +178,7 @@ details[open] summary::after { content: "−"; }
 .cadence-tooltip-content ol { margin: 0; padding-left: 19px; }
 .cadence-tooltip-content li + li { margin-top: 3px; }
 .cadence-tooltip:hover .cadence-tooltip-content, .cadence-tooltip:focus-within .cadence-tooltip-content { display: block; }
+.cadence-panel { overflow: visible; }
 .cadence-panel .import-result { margin-top: 16px; }
 .quality-panel { overflow: visible; }
 .quality-panel .panel-title { border-bottom: 0; }
