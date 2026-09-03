@@ -20,6 +20,9 @@ from .storage import Store
 
 MAX_NAME_WEIGHT = 0.05
 MONTHLY_TURNOVER_BUDGET = 0.20
+SECTOR_ACTIVE_LIMIT = 0.08
+DEFENSIVE_FACTOR_RANK_PERCENTILE = 0.75
+DEFENSIVE_ML_SCORE = 0.25
 
 
 def _number(value: Any) -> float | None:
@@ -32,6 +35,92 @@ def _format_metric(value: Any, *, percent: bool = False) -> str | None:
     if numeric is None:
         return None
     return f"{numeric * 100:.1f}%" if percent else f"{numeric:.2f}"
+
+
+EVIDENCE_METADATA: dict[str, dict[str, str]] = {
+    "Composite factor score": {
+        "calculation": "Arithmetic mean of the available factor-family scores. Eligibility requires at least 4 of 6 families and 2 institutional families.",
+        "source": "Certified point-in-time fundamentals, estimates, and adjusted-price history.",
+        "benchmark": "Each component is winsorized and sector-neutralized against the eligible S&P 500 universe.",
+    },
+    "ML score": {
+        "calculation": "Average percentile rank from walk-forward ElasticNet and gradient-boosting predictions of next-month excess return.",
+        "source": "Previously available factor observations and realized historical returns only.",
+        "benchmark": "0.00 to 1.00 cross-sectional percentile within the certified S&P 500 snapshot.",
+    },
+    "Value factor": {
+        "calculation": "Mean of sector-neutral z-scores for earnings yield, free-cash-flow yield, and EBITDA-to-enterprise-value.",
+        "source": "Certified point-in-time fundamental and valuation inputs.",
+        "benchmark": "Same-sector S&P 500 peers after 2.5% / 97.5% winsorization.",
+    },
+    "Quality factor": {
+        "calculation": "Mean of sector-neutral z-scores for ROIC, gross profitability, accruals (inverted), and net debt / EBITDA (inverted).",
+        "source": "Certified point-in-time fundamental inputs.",
+        "benchmark": "Same-sector S&P 500 peers after 2.5% / 97.5% winsorization.",
+    },
+    "Growth factor": {
+        "calculation": "Mean of sector-neutral z-scores for revenue growth, EPS growth, and margin change.",
+        "source": "Certified point-in-time fundamental inputs.",
+        "benchmark": "Same-sector S&P 500 peers after 2.5% / 97.5% winsorization.",
+    },
+    "Revision factor": {
+        "calculation": "Mean of sector-neutral z-scores for 1-month and 3-month EPS revisions plus estimate surprise.",
+        "source": "Certified point-in-time consensus-estimate history.",
+        "benchmark": "Same-sector S&P 500 peers after 2.5% / 97.5% winsorization.",
+    },
+    "P/E": {
+        "calculation": "Reported price-to-earnings multiple; lower is not automatically better without growth and quality context.",
+        "source": "Certified point-in-time valuation input.",
+        "benchmark": "Interpret alongside sector peers and the value-factor composite.",
+    },
+    "P/B": {
+        "calculation": "Reported price-to-book multiple; its usefulness varies materially by sector.",
+        "source": "Certified point-in-time valuation input.",
+        "benchmark": "Interpret alongside sector peers and the value-factor composite.",
+    },
+    "TEV / EBITDA": {
+        "calculation": "Reported enterprise-value-to-EBITDA multiple; lower is not automatically better without quality and growth context.",
+        "source": "Certified point-in-time valuation input.",
+        "benchmark": "Interpret alongside sector peers and the value-factor composite.",
+    },
+    "ROIC": {
+        "calculation": "Reported return on invested capital.",
+        "source": "Certified point-in-time fundamental input.",
+        "benchmark": "Interpret alongside same-sector S&P 500 peers and the quality-factor composite.",
+    },
+    "Gross margin": {
+        "calculation": "Reported gross profit divided by revenue.",
+        "source": "Certified point-in-time fundamental input.",
+        "benchmark": "Interpret alongside same-sector S&P 500 peers and the quality-factor composite.",
+    },
+    "Revenue growth": {
+        "calculation": "Reported period-over-period revenue growth.",
+        "source": "Certified point-in-time fundamental input.",
+        "benchmark": "Interpret alongside same-sector S&P 500 peers and the growth-factor composite.",
+    },
+    "EPS revision (1M)": {
+        "calculation": "Point-in-time change in consensus EPS estimate over the prior month.",
+        "source": "Certified consensus-estimate history.",
+        "benchmark": "Interpret alongside same-sector S&P 500 peers and the revision-factor composite.",
+    },
+    "Annualized volatility": {
+        "calculation": "Standard deviation of daily returns over up to 252 sessions, annualized by square-root-of-252.",
+        "source": "Certified adjusted-price history.",
+        "benchmark": "Interpret alongside same-sector S&P 500 peers and the low-risk factor.",
+    },
+}
+
+def _evidence_confidence(row: pd.Series, label: str, model_available: bool) -> tuple[str, str]:
+    family_count = int(_number(row.get("factor_family_count")) or 0)
+    institutional_count = int(_number(row.get("institutional_factor_family_count")) or 0)
+    coverage = f"Coverage: {family_count}/6 factor families, {institutional_count}/4 institutional families."
+    if label == "ML score":
+        status = "Moderate" if model_available else "Unavailable"
+        return status, "Walk-forward model output is a rank, not a probability of positive return."
+    if label.endswith("factor") or label == "Composite factor score":
+        status = "High" if family_count >= 5 and institutional_count >= 3 else "Moderate"
+        return status, f"{coverage} This grades input completeness, not investment outcome certainty."
+    return "Moderate", "A single observed metric is evidence, not a forecast or a stand-alone trade signal."
 
 
 def _latest_reference_prices(store: Store, as_of_date: date) -> tuple[dict[str, float], str | None]:
@@ -96,7 +185,9 @@ def _equal_weight_target(candidates: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _evidence(row: pd.Series, *, model_available: bool) -> list[dict[str, str]]:
+def _evidence(
+    row: pd.Series, *, model_available: bool, as_of_date: date
+) -> list[dict[str, str]]:
     values: list[tuple[str, Any, bool]] = [
         ("Composite factor score", row.get("factor_score"), False),
         ("ML score", row.get("ml_score"), False),
@@ -119,7 +210,21 @@ def _evidence(row: pd.Series, *, model_available: bool) -> list[dict[str, str]]:
             continue
         formatted = _format_metric(value, percent=percent)
         if formatted is not None:
-            output.append({"label": label, "value": formatted})
+            metadata = EVIDENCE_METADATA[label]
+            confidence, confidence_note = _evidence_confidence(row, label, model_available)
+            output.append(
+                {
+                    "label": label,
+                    "value": formatted,
+                    "calculation": metadata["calculation"],
+                    "source": metadata["source"],
+                    "benchmark": metadata["benchmark"],
+                    "confidence": confidence,
+                    "confidence_note": confidence_note,
+                    "available_at": as_of_date.isoformat(),
+                    "provenance_hash": str(row.get("source_snapshot_hash") or "Not recorded"),
+                }
+            )
     return output
 
 
@@ -174,6 +279,21 @@ def build_rebalance_advice(
 
     holdings_by_ticker = {str(item["symbol"]).upper(): item for item in holdings}
     score_rows = ranked.drop_duplicates("ticker").set_index("ticker", drop=False)
+    model_available = bool(np.abs(ranked["ml_score"]).sum() > 1e-9)
+    target_sector_weights = target.groupby("sector", dropna=False)["weight"].sum().to_dict()
+    current_sectors: dict[str, float] = {}
+    holding_sector_counts: dict[str, int] = {}
+    for ticker, holding in holdings_by_ticker.items():
+        sector = (
+            str(score_rows.loc[ticker].get("sector"))
+            if ticker in score_rows.index
+            else "Unclassified"
+        )
+        current_sectors[sector] = (
+            current_sectors.get(sector, 0.0)
+            + float(holding.get("market_value", 0.0) or 0.0) / equity
+        )
+        holding_sector_counts[sector] = holding_sector_counts.get(sector, 0) + 1
     actions: list[dict[str, Any]] = []
     for ticker in sorted(set(holdings_by_ticker) | set(target_weights)):
         holding = holdings_by_ticker.get(ticker, {})
@@ -191,7 +311,8 @@ def build_rebalance_advice(
             )
             reference_price = 0.0
         operational_score = _number(row.get("operational_score")) or 0.0
-        rank = int(_number(row.get("rank")) or 9999)
+        rank_value = _number(row.get("rank"))
+        rank = int(rank_value) if rank_value is not None else None
         sector = str(row.get("sector") or target_sectors.get(ticker) or "Unclassified")
         actions.append(
             {
@@ -200,21 +321,133 @@ def build_rebalance_advice(
                 "rank": rank,
                 "operational_score": operational_score,
                 "factor_score": _number(row.get("factor_score")),
+                "factor_family_count": int(_number(row.get("factor_family_count")) or 0),
+                "institutional_factor_family_count": int(
+                    _number(row.get("institutional_factor_family_count")) or 0
+                ),
                 "ml_score": _number(row.get("ml_score")),
                 "short_horizon_score": _number(row.get("short_horizon_score")),
                 "current_quantity": current_quantity,
                 "current_value": current_value,
                 "current_weight": current_weight,
                 "target_weight": target_weight,
+                "risk_limit_weight": current_weight,
                 "reference_price": reference_price,
                 "desired_delta_value": desired_delta_value,
-                "evidence": _evidence(
-                    row, model_available=bool(np.abs(ranked["ml_score"]).sum() > 1e-9)
-                )
+                "evidence": _evidence(row, model_available=model_available, as_of_date=as_of_date)
                 if not row.empty
                 else [],
+                "risk_details": [],
             }
         )
+
+    # The model target is a source of *new idea* selection.  Existing holdings
+    # are trimmed only when their own portfolio-risk gate fires.  Falling out of
+    # a fresh target is not, by itself, a bearish conclusion.
+    for action in actions:
+        if action["current_quantity"] <= 0:
+            action["bucket"] = "purchase"
+            continue
+        sector = action["sector"]
+        flags: list[str] = []
+        risk_limit = action["current_weight"]
+        if action["current_weight"] > MAX_NAME_WEIGHT + 1e-8:
+            flag = f"Position concentration {action['current_weight']:.1%} exceeds the {MAX_NAME_WEIGHT:.0%} name limit"
+            flags.append(flag)
+            action["risk_details"].append(
+                {
+                    "label": "Position concentration",
+                    "value": f"{action['current_weight']:.1%}",
+                    "calculation": "Position market value divided by synchronized paper-account equity.",
+                    "source": "User-requested Alpaca paper position and account snapshot.",
+                    "benchmark": f"Portfolio policy maximum: {MAX_NAME_WEIGHT:.0%} per name.",
+                    "confidence": "High",
+                    "confidence_note": "This is an arithmetic exposure check, not a return forecast.",
+                    "available_at": as_of_date.isoformat(),
+                }
+            )
+            risk_limit = min(risk_limit, MAX_NAME_WEIGHT)
+        sector_overage = current_sectors.get(sector, 0.0) - (
+            float(target_sector_weights.get(sector, 0.0)) + SECTOR_ACTIVE_LIMIT
+        )
+        if sector_overage > 1e-8:
+            flag = f"{sector} exposure exceeds its model target plus the {SECTOR_ACTIVE_LIMIT:.0%} active-risk band"
+            flags.append(flag)
+            action["risk_details"].append(
+                {
+                    "label": "Sector exposure",
+                    "value": f"{current_sectors.get(sector, 0.0):.1%}",
+                    "calculation": "Sum of current position market values in the sector divided by account equity.",
+                    "source": "Synchronized paper holdings, certified sector mapping, and constrained model target.",
+                    "benchmark": f"Model sector target {target_sector_weights.get(sector, 0.0):.1%} plus {SECTOR_ACTIVE_LIMIT:.0%} active-risk band.",
+                    "confidence": "High",
+                    "confidence_note": "This is an arithmetic exposure check, not a return forecast.",
+                    "available_at": as_of_date.isoformat(),
+                }
+            )
+            sector_limit = action["current_weight"] - sector_overage / holding_sector_counts[sector]
+            risk_limit = min(risk_limit, max(0.0, sector_limit))
+        rank_percentile = (
+            action["rank"] / max(len(ranked), 1)
+            if action["rank"] is not None
+            else None
+        )
+        factor_weak = (
+            rank_percentile is not None
+            and rank_percentile > DEFENSIVE_FACTOR_RANK_PERCENTILE
+        )
+        ml_weak = (
+            model_available
+            and action["ml_score"] is not None
+            and action["ml_score"] < DEFENSIVE_ML_SCORE
+        )
+        if factor_weak:
+            flag = f"Composite factor rank #{action['rank']} is in the lowest quarter of the certified universe"
+            flags.append(flag)
+            action["risk_details"].append(
+                {
+                    "label": "Weak composite factor rank",
+                    "value": f"#{action['rank']}",
+                    "calculation": "Descending rank of the certified composite factor score across the eligible S&P 500 universe.",
+                    "source": "Certified point-in-time factor snapshot.",
+                    "benchmark": "Defensive threshold: lowest 25% of eligible S&P 500 names.",
+                    "confidence": "Moderate",
+                    "confidence_note": "Coverage and cross-sectional strength, not a probability of loss.",
+                    "available_at": as_of_date.isoformat(),
+                }
+            )
+        if ml_weak:
+            flag = f"ML score {(action['ml_score'] or 0.0):.2f} is below the defensive threshold"
+            flags.append(flag)
+            action["risk_details"].append(
+                {
+                    "label": "Weak ML score",
+                    "value": f"{action['ml_score'] or 0.0:.2f}",
+                    "calculation": "Walk-forward ensemble percentile for next-month excess-return prediction.",
+                    "source": "Previously available factor observations and realized historical returns only.",
+                    "benchmark": f"Defensive threshold: below {DEFENSIVE_ML_SCORE:.2f} percentile score.",
+                    "confidence": "Moderate",
+                    "confidence_note": "Model output is a rank, not a probability of loss or a short signal.",
+                    "available_at": as_of_date.isoformat(),
+                }
+            )
+        if factor_weak or ml_weak:
+            # A weak holding is only trimmed to a defensive half-size, never
+            # converted into a short or an automatic exit.
+            risk_limit = min(risk_limit, MAX_NAME_WEIGHT / 2)
+        action["risk_flags"] = flags
+        action["risk_limit_weight"] = risk_limit
+        if flags and risk_limit < action["current_weight"] - 1e-8:
+            action["bucket"] = "risk"
+            action["desired_delta_value"] = equity * risk_limit - action["current_value"]
+        elif action["target_weight"] > action["current_weight"] + 1e-8:
+            action["bucket"] = "purchase"
+            action["desired_delta_value"] = (
+                equity * action["target_weight"] - action["current_value"]
+            )
+        else:
+            action["bucket"] = "none"
+            action["desired_delta_value"] = 0.0
 
     _allocate_notional(actions, equity)
     for action in actions:
@@ -224,8 +457,9 @@ def build_rebalance_advice(
         if delta < 0:
             action["action"] = "Reduce"
             action["reason"] = (
-                f"Current weight {action['current_weight']:.1%} is above the constrained target "
-                f"of {action['target_weight']:.1%}; this is the next staged risk reduction."
+                "Portfolio-risk reduction, not a bearish call: "
+                + "; ".join(action["risk_flags"])
+                + f". This staged change moves the holding toward a {action['risk_limit_weight']:.1%} risk limit."
             )
         elif action["current_quantity"] > 0:
             action["action"] = "Add"
@@ -257,18 +491,6 @@ def build_rebalance_advice(
         )
     )
 
-    current_sectors: dict[str, float] = {}
-    for ticker, holding in holdings_by_ticker.items():
-        sector = (
-            str(score_rows.loc[ticker].get("sector"))
-            if ticker in score_rows.index
-            else "Unclassified"
-        )
-        current_sectors[sector] = (
-            current_sectors.get(sector, 0.0)
-            + float(holding.get("market_value", 0.0) or 0.0) / equity
-        )
-    target_sector_weights = target.groupby("sector", dropna=False)["weight"].sum().to_dict()
     sectors = [
         {
             "sector": str(sector),
@@ -279,7 +501,6 @@ def build_rebalance_advice(
         }
         for sector in sorted(set(current_sectors) | set(target_sector_weights))
     ]
-    model_available = bool(np.abs(ranked["ml_score"]).sum() > 1e-9)
     if not model_available:
         warnings.append(
             "No non-zero walk-forward ML scores were available at this cutoff; ranking is factor-led."
@@ -289,6 +510,7 @@ def build_rebalance_advice(
             "Research proposal only. It is not an order, quote, or individualized investment instruction.",
             "Reference prices are the latest locally stored adjusted closes and may differ from executable market prices.",
             "The staged plan limits one-way monthly turnover to 20% of account equity and caps every target name at 5%.",
+            "A company missing from the buy target is not a bearish call. Existing holdings are reduced only when their portfolio-risk gate is triggered.",
         ]
     )
     return {
@@ -302,6 +524,8 @@ def build_rebalance_advice(
         "max_name_weight": MAX_NAME_WEIGHT,
         "target_holdings": int(len(target)),
         "current_sector_weights": sectors,
+        "risk_reductions": [action for action in actions if action["action"] == "Reduce"],
+        "purchase_candidates": [action for action in actions if action["action"] != "Reduce"],
         "actions": actions,
         "warnings": list(dict.fromkeys(warnings)),
     }

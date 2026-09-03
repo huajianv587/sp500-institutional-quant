@@ -145,10 +145,18 @@
     </section>
 
     {% elif slug == 'debate' %}
-    <section class="panel"><div class="panel-title"><h2>Consensus decisions</h2><span>Independent analysts · two-round debate · judge</span></div>
+    <section class="warning debate-boundary"><b>Long and bearish research are separate conclusions</b><p>Bearish candidates require an evidence-grounded Underweight or Sell consensus from the uploaded point-in-time data. They are research views, not short orders. If the data does not support a bearish conclusion, no company is shown.</p></section>
+    <section class="panel debate-control-panel"><div class="panel-title"><h2>Consensus decisions</h2><span>Independent analysts · two-round debate · judge</span></div>
+      <div class="debate-controls" role="group" aria-label="Debate result display"><button class="debate-filter active" type="button" data-debate-filter="long">Long only</button><button class="debate-filter" type="button" data-debate-filter="long,bearish">Long + Bearish</button><button class="debate-filter" type="button" data-debate-filter="all">All research</button><span>Long-only is the default display. It does not create an order or suppress stored research.</span></div>
+      <div class="debate-screen"><button id="run-bearish-screen" class="btn btn-outline-primary" type="button">Run bearish screen</button><span>Uses uploaded fundamentals, estimates, factor and price-risk data. News is not inferred; it requires a separate attributable data source. This creates no order.</span></div>
+      <pre id="bearish-screen-result" class="import-result" hidden aria-live="polite"></pre>
+    </section>
+    {% for section in debate_sections %}
+    <section class="panel debate-result-section" data-debate-section="{{ section.key }}"{% if section.key != 'long' %} hidden{% endif %}>
+      <div class="panel-title"><h2>{{ section.title }}</h2><span>{{ section.description }}</span></div>
       <div class="cards">
-      {% for row in decisions %}<article class="decision">
-        <div class="decision-heading"><b>{{ row.ticker }}</b><span class="rating">{{ row.rating }}</span></div>
+      {% for row in section.decisions %}<article class="decision">
+        <div class="decision-heading"><b>{{ row.ticker }}</b><span class="rating rating-{{ row.debate_bucket }}">{{ row.rating }}</span></div>
         <p class="decision-summary">{{ row.summary_display or row.summary }}</p>
         {% if row.evidence_refs %}
         <div class="evidence-strip" aria-label="Evidence fields">
@@ -165,9 +173,36 @@
         {% endif %}
         <small>Adjustment {{ '%+.3f'|format(row.score_adjustment) }} · {{ row.evidence_count }} evidence links</small>
       </article>
-      {% else %}<div class="empty">No evidence-grounded debate has completed.</div>{% endfor %}
+      {% else %}<div class="empty">No evidence-grounded {{ 'bearish' if section.key == 'bearish' else section.key }} conclusion is available from the uploaded data.</div>{% endfor %}
       </div>
     </section>
+    {% endfor %}
+    <script>
+      const debateFilters = document.querySelectorAll('.debate-filter');
+      const debateSections = document.querySelectorAll('[data-debate-section]');
+      debateFilters.forEach((button) => button.addEventListener('click', () => {
+        const selected = button.dataset.debateFilter === 'all' ? ['long', 'bearish', 'neutral'] : button.dataset.debateFilter.split(',');
+        debateFilters.forEach((filter) => filter.classList.toggle('active', filter === button));
+        debateSections.forEach((section) => { section.hidden = !selected.includes(section.dataset.debateSection); });
+      }));
+      const bearishScreenButton = document.getElementById('run-bearish-screen');
+      const bearishScreenResult = document.getElementById('bearish-screen-result');
+      bearishScreenButton?.addEventListener('click', async () => {
+        bearishScreenButton.disabled = true;
+        bearishScreenResult.hidden = false;
+        bearishScreenResult.textContent = 'Starting adverse-evidence research screen…';
+        try {
+          const response = await fetch('/api/v1/debate/bearish-screen', { method: 'POST' });
+          const payload = await response.json();
+          if (!response.ok) throw new Error(payload.detail || 'Unable to start the bearish screen.');
+          bearishScreenResult.textContent = `Bearish research started. Job ${payload.job_id}. Refresh this page after it completes; only Underweight or Sell conclusions will appear.`;
+        } catch (error) {
+          bearishScreenResult.textContent = `Bearish screen unavailable: ${error.message}`;
+        } finally {
+          bearishScreenButton.disabled = false;
+        }
+      });
+    </script>
 
     {% elif slug == 'portfolio' %}
     <section class="grid stats">
@@ -216,8 +251,12 @@
           <article><p>Signal stack</p><strong id="advice-signal" class="small-strong">—</strong><small id="advice-as-of">Certified cutoff</small></article>
         </div>
         <section class="advice-section">
-          <div class="advice-section-title"><h3>Priority actions</h3><span id="advice-price-date">Reference prices</span></div>
-          <div class="table-scroll"><table class="table advice-table"><thead><tr><th>Priority</th><th>Action</th><th>Ticker</th><th>Sector</th><th>Current → target</th><th>Proposed shares</th><th>Reference price</th><th>Score</th><th>Evidence</th></tr></thead><tbody id="advice-actions"></tbody></table></div>
+          <div class="advice-section-title"><h3>Risk reductions from current holdings</h3><span>Click a risk or evidence tag for method and provenance</span></div>
+          <div class="table-scroll"><table class="table advice-table"><thead><tr><th>Priority</th><th>Action</th><th>Ticker</th><th>Sector</th><th>Current → risk limit</th><th>Proposed shares</th><th>Reference price</th><th>Score</th><th>Risk and evidence</th></tr></thead><tbody id="advice-reductions"></tbody></table></div>
+        </section>
+        <section class="advice-section">
+          <div class="advice-section-title"><h3>New and additional research candidates</h3><span id="advice-price-date">Reference prices</span></div>
+          <div class="table-scroll"><table class="table advice-table"><thead><tr><th>Priority</th><th>Action</th><th>Ticker</th><th>Sector</th><th>Current → model target</th><th>Proposed shares</th><th>Reference price</th><th>Score</th><th>Evidence</th></tr></thead><tbody id="advice-purchases"></tbody></table></div>
         </section>
         <section class="advice-section">
           <div class="advice-section-title"><h3>Sector allocation</h3><span>Current exposure versus constrained target</span></div>
@@ -226,6 +265,19 @@
         <section class="advice-section advice-notes"><h3>How to read this proposal</h3><ul id="advice-warnings"></ul></section>
       </div>
     </section>
+    <aside id="evidence-popover" class="evidence-popover" role="tooltip" aria-live="polite" hidden>
+      <div class="evidence-popover-head"><div><p>Evidence detail</p><h2 id="evidence-dialog-title">—</h2></div></div>
+      <p id="evidence-dialog-value" class="evidence-dialog-value">—</p>
+      <dl class="evidence-popover-grid">
+        <div><dt>Calculation</dt><dd id="evidence-dialog-calculation">—</dd></div>
+        <div><dt>Data source</dt><dd id="evidence-dialog-source">—</dd></div>
+        <div><dt>Benchmark</dt><dd id="evidence-dialog-benchmark">—</dd></div>
+        <div><dt>Available at</dt><dd id="evidence-dialog-available">—</dd></div>
+        <div><dt>Evidence confidence</dt><dd id="evidence-dialog-confidence">—</dd></div>
+        <div><dt>Snapshot provenance</dt><dd id="evidence-dialog-provenance" class="mono">—</dd></div>
+      </dl>
+      <p id="evidence-dialog-note" class="evidence-dialog-note">—</p>
+    </aside>
     <section class="panel watchlist-panel">
       <div class="panel-title"><h2>My watchlist</h2><span>Personal research queue · separate from holdings</span></div>
       <form id="watchlist-form" class="watchlist-form">
@@ -382,7 +434,9 @@
     const rebalanceGenerate = document.getElementById('rebalance-generate');
     const rebalanceResult = document.getElementById('rebalance-result');
     const rebalanceOutput = document.getElementById('rebalance-output');
+    const evidencePopover = document.getElementById('evidence-popover');
     let brokerSnapshot = null;
+    let latestAdvice = null;
     const money = (value) => Number(value || 0).toLocaleString(undefined, {style: 'currency', currency: 'USD'});
     const number = (value) => Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: 4});
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -408,21 +462,69 @@
     const percent = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
     const actionClass = (action) => action === 'Reduce' ? 'advice-action reduce' : 'advice-action add';
     const renderAdvice = (advice) => {
+      latestAdvice = advice;
       document.getElementById('advice-target-holdings').textContent = advice.target_holdings || '—';
       document.getElementById('advice-turnover').textContent = percent(advice.monthly_turnover_budget);
       document.getElementById('advice-signal').textContent = advice.model_signal || '—';
       document.getElementById('advice-as-of').textContent = `Certified cutoff: ${advice.as_of_date || '—'}`;
       document.getElementById('advice-price-date').textContent = advice.reference_price_date ? `Reference prices: ${advice.reference_price_date}` : 'Reference prices unavailable';
-      const actions = advice.actions || [];
-      document.getElementById('advice-actions').innerHTML = actions.length ? actions.map((item, index) => {
-        const evidence = (item.evidence || []).slice(0, 4).map((entry) => `<span class="evidence-chip">${escapeHtml(entry.label)} ${escapeHtml(entry.value)}</span>`).join('');
-        return `<tr><td>${index + 1}</td><td><span class="${actionClass(item.action)}">${escapeHtml(item.action)}</span></td><td><b>${escapeHtml(item.ticker)}</b><small class="advice-reason">${escapeHtml(item.reason)}</small></td><td>${escapeHtml(item.sector)}</td><td>${percent(item.current_weight)} → ${percent(item.target_weight)}</td><td>${item.proposed_shares == null ? '—' : number(item.proposed_shares)}</td><td>${item.reference_price ? money(item.reference_price) : '—'}</td><td>#${item.rank} · ${Number(item.operational_score || 0).toFixed(3)}</td><td><div class="evidence-strip compact">${evidence || '—'}</div></td></tr>`;
-      }).join('') : '<tr><td colspan="9" class="empty">No staged changes are needed under the current constraints.</td></tr>';
+      const renderActionRows = (items, targetField, emptyText, group) => items.length ? items.map((item, index) => {
+        const evidence = (item.evidence || []).slice(0, 4).map((entry, detailIndex) => `<button class="evidence-chip evidence-button" type="button" aria-describedby="evidence-popover" data-detail-kind="evidence" data-action-group="${group}" data-action-index="${index}" data-detail-index="${detailIndex}">${escapeHtml(entry.label)} ${escapeHtml(entry.value)}</button>`).join('');
+        const flags = (item.risk_details || []).map((detail, detailIndex) => `<button class="risk-flag risk-button" type="button" aria-describedby="evidence-popover" data-detail-kind="risk" data-action-group="${group}" data-action-index="${index}" data-detail-index="${detailIndex}">${escapeHtml(detail.label)}: ${escapeHtml(detail.value)}</button>`).join('');
+        return `<tr><td>${index + 1}</td><td><span class="${actionClass(item.action)}">${escapeHtml(item.action)}</span></td><td><b>${escapeHtml(item.ticker)}</b><small class="advice-reason">${escapeHtml(item.reason)}</small></td><td>${escapeHtml(item.sector)}</td><td>${percent(item.current_weight)} → ${percent(item[targetField])}</td><td>${item.proposed_shares == null ? '—' : number(item.proposed_shares)}</td><td>${item.reference_price ? money(item.reference_price) : '—'}</td><td>#${item.rank} · ${Number(item.operational_score || 0).toFixed(3)}</td><td><div class="risk-flags">${flags}</div><div class="evidence-strip compact">${evidence || '—'}</div></td></tr>`;
+      }).join('') : `<tr><td colspan="9" class="empty">${emptyText}</td></tr>`;
+      document.getElementById('advice-reductions').innerHTML = renderActionRows(advice.risk_reductions || [], 'risk_limit_weight', 'No current holding triggered a staged risk reduction.', 'risk_reductions');
+      document.getElementById('advice-purchases').innerHTML = renderActionRows(advice.purchase_candidates || [], 'target_weight', 'No new or additional candidate is funded within the current staging budget.', 'purchase_candidates');
       const sectors = advice.current_sector_weights || [];
       document.getElementById('advice-sectors').innerHTML = sectors.map((item) => `<tr><td><b>${escapeHtml(item.sector)}</b></td><td>${percent(item.current_weight)}</td><td>${percent(item.target_weight)}</td><td>${item.difference >= 0 ? '+' : ''}${percent(item.difference)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Sector coverage is unavailable.</td></tr>';
       document.getElementById('advice-warnings').innerHTML = (advice.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join('');
       rebalanceOutput.hidden = false;
     };
+    const detailText = (id, value) => { document.getElementById(id).textContent = value || 'Not available'; };
+    const showEvidencePopover = (detail, trigger) => {
+      detailText('evidence-dialog-title', detail.label);
+      detailText('evidence-dialog-value', detail.value);
+      detailText('evidence-dialog-calculation', detail.calculation);
+      detailText('evidence-dialog-source', detail.source);
+      detailText('evidence-dialog-benchmark', detail.benchmark);
+      detailText('evidence-dialog-available', detail.available_at);
+      detailText('evidence-dialog-confidence', detail.confidence);
+      detailText('evidence-dialog-provenance', detail.provenance_hash || 'Position and policy gate; no factor snapshot hash');
+      detailText('evidence-dialog-note', detail.confidence_note);
+      evidencePopover.hidden = false;
+      const rect = trigger.getBoundingClientRect();
+      const width = Math.min(620, window.innerWidth - 32);
+      const left = Math.max(16, Math.min(rect.left, window.innerWidth - width - 16));
+      const below = rect.bottom + 10;
+      const top = below + 460 < window.innerHeight ? below : Math.max(16, rect.top - 470);
+      evidencePopover.style.left = `${left}px`;
+      evidencePopover.style.top = `${top}px`;
+    };
+    const hideEvidencePopover = () => { evidencePopover.hidden = true; };
+    const detailFor = (trigger) => {
+      if (!latestAdvice) return null;
+      const action = (latestAdvice[trigger.dataset.actionGroup] || [])[Number(trigger.dataset.actionIndex)];
+      const details = trigger.dataset.detailKind === 'risk' ? action?.risk_details : action?.evidence;
+      return details?.[Number(trigger.dataset.detailIndex)] || null;
+    };
+    rebalanceOutput.addEventListener('pointerover', (event) => {
+      const button = event.target.closest('[data-detail-kind]');
+      if (!button || button.contains(event.relatedTarget)) return;
+      const detail = detailFor(button);
+      if (detail) showEvidencePopover(detail, button);
+    });
+    rebalanceOutput.addEventListener('pointerout', (event) => {
+      const button = event.target.closest('[data-detail-kind]');
+      if (button && !button.contains(event.relatedTarget)) hideEvidencePopover();
+    });
+    rebalanceOutput.addEventListener('focusin', (event) => {
+      const button = event.target.closest('[data-detail-kind]');
+      const detail = button && detailFor(button);
+      if (detail) showEvidencePopover(detail, button);
+    });
+    rebalanceOutput.addEventListener('focusout', (event) => {
+      if (event.target.closest('[data-detail-kind]')) hideEvidencePopover();
+    });
     document.getElementById('holdings-sync').addEventListener('click', async () => {
       holdingsResult.textContent = 'Reading Alpaca paper account and positions…';
       holdingsResult.className = 'import-result';

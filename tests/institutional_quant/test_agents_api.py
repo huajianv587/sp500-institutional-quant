@@ -17,7 +17,7 @@ from institutional_quant.agents import (
     _strict_json_schema,
 )
 from institutional_quant.alpaca import AlpacaPaperClient
-from institutional_quant.api import create_app
+from institutional_quant.api import _bearish_research_candidates, _prepare_decision, create_app
 from institutional_quant.config import Settings
 from institutional_quant.rebalance import build_rebalance_advice
 from institutional_quant.schemas import (
@@ -110,6 +110,56 @@ def test_deepseek_strict_schema_requires_all_nested_properties() -> None:
     claim = schema["$defs"]["EvidenceClaim"]
     assert set(claim["required"]) == set(claim["properties"])
     assert claim["additionalProperties"] is False
+
+
+def test_prepared_decision_separates_long_bearish_and_neutral_ratings() -> None:
+    base = {
+        "ticker": "TEST",
+        "summary": "Grounded conclusion",
+        "supporting_evidence": ["src:revenue"],
+    }
+
+    assert _prepare_decision({**base, "rating": "Overweight"})["debate_bucket"] == "long"
+    assert _prepare_decision({**base, "rating": "Sell"})["debate_bucket"] == "bearish"
+    assert _prepare_decision({**base, "rating": "Underweight"})["debate_bucket"] == "bearish"
+    assert _prepare_decision({**base, "rating": "Hold"})["debate_bucket"] == "neutral"
+
+
+def test_bearish_research_screen_requires_weak_factor_and_multiple_adverse_signals(
+    monkeypatch,
+) -> None:
+    class FakeFactors:
+        def __init__(self, _store):
+            pass
+
+        def snapshot(self, _as_of_date):
+            return pd.DataFrame(
+                [
+                    {
+                        "company_id": "bear",
+                        "ticker": "BEAR",
+                        "factor_score": -2.0,
+                        "price_to_earnings": 100.0,
+                        "revenue_growth": -0.2,
+                        "eps_revision_1m": -0.1,
+                        "volatility_252d": 0.8,
+                    },
+                    {"company_id": "one", "ticker": "ONE", "factor_score": 0.0, "price_to_earnings": 10.0, "volatility_252d": 0.2},
+                    {"company_id": "two", "ticker": "TWO", "factor_score": 1.0, "price_to_earnings": 11.0, "volatility_252d": 0.21},
+                    {"company_id": "three", "ticker": "THREE", "factor_score": 2.0, "price_to_earnings": 12.0, "volatility_252d": 0.22},
+                ]
+            )
+
+    class FakeStore:
+        def query_df(self, *_args, **_kwargs):
+            return pd.DataFrame()
+
+    monkeypatch.setattr("institutional_quant.api.FactorEngine", FakeFactors)
+
+    screened = _bearish_research_candidates(FakeStore(), date(2026, 9, 1))
+
+    assert screened["ticker"].tolist() == ["BEAR"]
+    assert screened.iloc[0]["bearish_signal_count"] >= 2
 
 
 def test_responses_client_ignores_reasoning_text() -> None:
@@ -274,6 +324,37 @@ def test_dashboard_and_health_use_duckdb_fixture(tmp_path) -> None:
         assert "Automatic import" in page.text
 
 
+def test_debate_page_defaults_to_long_only_and_exposes_bearish_research(tmp_path) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-debate.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+    )
+    with TestClient(create_app(settings)) as client:
+        page = client.get("/debate")
+
+    assert page.status_code == 200
+    assert "Long only" in page.text
+    assert "Run bearish screen" in page.text
+    assert "not short orders" in page.text
+    assert "News is not inferred" in page.text
+
+
+def test_bearish_screen_requires_explicit_external_processing_gate(tmp_path) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-bearish-gate.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.post("/api/v1/debate/bearish-screen")
+
+    assert response.status_code == 403
+    assert "CIQ_EXTERNAL_PROCESSING_CONFIRMED" in response.json()["detail"]
+
+
 def test_current_market_returns_upload_infers_missing_snapshot_timestamps(tmp_path) -> None:
     settings = Settings(
         database_backend="duckdb",
@@ -421,6 +502,8 @@ def test_my_holdings_keeps_watchlist_and_paper_sync_read_only(tmp_path) -> None:
         assert "No brokerage data loaded" in page.text
         assert "Generate advice from synced holdings" in page.text
         assert "Research proposal · paper only · no order authority" in page.text
+        assert "Risk reductions from current holdings" in page.text
+        assert "New and additional research candidates" in page.text
 
         created = client.post("/api/v1/watchlist", json={"ticker": "aapl", "note": "Review earnings"})
         assert created.status_code == 201
@@ -488,11 +571,86 @@ def test_rebalance_advice_stages_concentration_reduction_and_explains_evidence()
     additions = [action for action in advice["actions"] if action["action"] == "Initiate"]
     assert reductions[0]["ticker"] == "MSFT"
     assert reductions[0]["proposed_notional"] <= 200.0
+    assert reductions[0]["risk_limit_weight"] == 0.025
+    assert reductions[0]["risk_flags"]
+    assert reductions[0]["risk_details"][0]["calculation"]
+    assert reductions[0]["risk_details"][0]["benchmark"] == "Portfolio policy maximum: 5% per name."
     assert additions[0]["ticker"] == "AAPL"
     assert additions[0]["proposed_shares"] == 1.0
     assert {item["label"] for item in additions[0]["evidence"]} >= {"P/E", "ROIC"}
+    roic = next(item for item in additions[0]["evidence"] if item["label"] == "ROIC")
+    assert roic["calculation"] == "Reported return on invested capital."
+    assert roic["source"] == "Certified point-in-time fundamental input."
+    assert roic["benchmark"]
+    assert roic["confidence"] == "Moderate"
+    assert roic["available_at"] == "2026-09-01"
     assert advice["max_name_weight"] == 0.05
     assert any("not an order" in warning for warning in advice["warnings"])
+    assert advice["risk_reductions"] == reductions
+    assert advice["purchase_candidates"] == additions
+
+
+def test_unselected_holding_is_not_reduced_without_a_portfolio_risk_trigger() -> None:
+    ranked = pd.DataFrame(
+        [
+            {"ticker": "KEEP", "sector": "Utilities", "operational_score": 0.9, "factor_score": 0.9, "ml_score": 0.8},
+            {"ticker": "BUY", "sector": "Health Care", "operational_score": 0.8, "factor_score": 0.8, "ml_score": 0.7},
+        ]
+    )
+    target = pd.DataFrame(
+        [{"company_id": "BUY", "ticker": "BUY", "sector": "Health Care", "weight": 0.05, "score": 0.8}]
+    )
+    advice = build_rebalance_advice(
+        ranked,
+        target,
+        [{"symbol": "KEEP", "qty": 4.0, "current_price": 10.0, "market_value": 40.0}],
+        1_000.0,
+        {"KEEP": 10.0, "BUY": 20.0},
+        as_of_date=date(2026, 9, 1),
+        reference_price_date="2026-09-01",
+    )
+
+    assert advice["risk_reductions"] == []
+    assert not any(action["ticker"] == "KEEP" for action in advice["actions"])
+
+
+def test_holding_without_a_current_score_is_not_assumed_to_be_a_sell_signal() -> None:
+    ranked = pd.DataFrame(
+        [
+            {
+                "ticker": "BUY",
+                "sector": "Health Care",
+                "rank": 1,
+                "operational_score": 0.9,
+                "factor_score": 1.0,
+                "ml_score": 0.8,
+            }
+        ]
+    )
+    target = pd.DataFrame(
+        [
+            {
+                "company_id": "BUY",
+                "ticker": "BUY",
+                "sector": "Health Care",
+                "weight": 0.05,
+                "score": 0.9,
+            }
+        ]
+    )
+
+    advice = build_rebalance_advice(
+        ranked,
+        target,
+        [{"symbol": "UNSCORED", "qty": 20.0, "current_price": 20.0, "market_value": 400.0}],
+        10_000.0,
+        {"BUY": 50.0, "UNSCORED": 20.0},
+        as_of_date=date(2026, 9, 1),
+        reference_price_date="2026-09-01",
+    )
+
+    assert advice["risk_reductions"] == []
+    assert not any(action["ticker"] == "UNSCORED" for action in advice["actions"])
 
 
 def test_rebalance_advice_endpoint_uses_submitted_snapshot_without_broker_call(tmp_path, monkeypatch) -> None:

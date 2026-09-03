@@ -29,6 +29,7 @@ from .factors import FactorEngine
 from .ingestion import CapitalIQImporter, certify_point_in_time
 from .jobs import JobManager
 from .operations import (
+    _cutoff,
     prepare_one_share_order,
     run_daily,
     run_full_cycle,
@@ -223,6 +224,14 @@ def _prepare_decision(value: Any) -> Any:
     prepared["summary_display"] = display_summary or summary
     prepared["evidence_refs"] = evidence_refs
     prepared["evidence_count"] = len(evidence)
+    rating = str(prepared.get("rating") or "")
+    prepared["debate_bucket"] = (
+        "long"
+        if rating in {"Buy", "Overweight"}
+        else "bearish"
+        if rating in {"Underweight", "Sell"}
+        else "neutral"
+    )
     return prepared
 
 
@@ -262,6 +271,69 @@ def _research_candidates(store: Store, as_of_date: date, requested: list[str]) -
     )
     disagreements = snapshot.nlargest(3, "disagreement")
     return pd.concat([top, deteriorating, disagreements]).drop_duplicates("company_id").head(10)
+
+
+def _bearish_research_candidates(store: Store, as_of_date: date) -> pd.DataFrame:
+    """Select only names with several independent adverse signals for research.
+
+    This is a research screen, not a short signal.  A low composite rank alone
+    is intentionally insufficient: the company must also have adverse uploaded
+    valuation, fundamental, estimate, model, or market-risk evidence.
+    """
+    snapshot = FactorEngine(store).snapshot(as_of_date).dropna(subset=["factor_score"]).copy()
+    if snapshot.empty:
+        return snapshot
+    snapshot["ml_score"] = 0.0
+    previous = store.query_df(
+        """
+        WITH latest AS (
+          SELECT MAX(as_of_date) AS as_of_date FROM factor_observations WHERE as_of_date <= ?
+        )
+        SELECT company_id, ml_score FROM factor_observations
+        WHERE as_of_date = (SELECT as_of_date FROM latest)
+        """,
+        [as_of_date],
+    )
+    if not previous.empty:
+        snapshot = snapshot.drop(columns="ml_score").merge(previous, on="company_id", how="left")
+        snapshot["ml_score"] = pd.to_numeric(snapshot["ml_score"], errors="coerce").fillna(0.0)
+    model_available = bool(snapshot["ml_score"].abs().sum() > 1e-9)
+    factor_weak = snapshot["factor_score"].rank(pct=True) <= 0.25
+    ml_weak = snapshot["ml_score"].rank(pct=True) <= 0.25 if model_available else pd.Series(False, index=snapshot.index)
+
+    def numeric(name: str) -> pd.Series:
+        return pd.to_numeric(snapshot.get(name, pd.Series(index=snapshot.index, dtype=float)), errors="coerce")
+
+    valuation_stretched = pd.Series(False, index=snapshot.index)
+    for field in ("price_to_earnings", "price_to_book", "tev_ebitda"):
+        values = numeric(field)
+        valid = values.loc[values > 0]
+        if not valid.empty:
+            valuation_stretched |= values >= valid.quantile(0.80)
+    fundamental_deterioration = (numeric("revenue_growth") < 0) | (numeric("eps_growth") < 0) | (numeric("margin_change") < 0)
+    estimate_deterioration = (numeric("eps_revision_1m") < 0) | (numeric("eps_revision_3m") < 0) | (numeric("estimate_surprise") < 0)
+    market_risk = pd.Series(False, index=snapshot.index)
+    for field in ("volatility_252d", "beta_252d"):
+        values = numeric(field)
+        valid = values.dropna()
+        if not valid.empty:
+            market_risk |= values >= valid.quantile(0.80)
+
+    adverse_count = (
+        valuation_stretched.astype(int)
+        + fundamental_deterioration.fillna(False).astype(int)
+        + estimate_deterioration.fillna(False).astype(int)
+        + market_risk.astype(int)
+        + ml_weak.astype(int)
+    )
+    snapshot["bearish_signal_count"] = adverse_count
+    screened = snapshot.loc[factor_weak & (adverse_count >= 2)].copy()
+    if screened.empty:
+        return screened
+    screened["bearish_screen_score"] = (
+        (1 - screened["factor_score"].rank(pct=True)) + screened["bearish_signal_count"] / 5
+    )
+    return screened.nlargest(5, "bearish_screen_score")
 
 
 def _build_portfolio(store: Store, as_of_date: date, decisions: list[dict[str, Any]]):
@@ -510,6 +582,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return app.state.jobs.submit("research_run", work)
 
+    @app.post("/api/v1/debate/bearish-screen", status_code=202)
+    async def bearish_debate_screen():
+        """Research adverse factor cases without creating a short or trade instruction."""
+        if not settings.ciq_external_processing_confirmed:
+            raise HTTPException(
+                status_code=403, detail="CIQ_EXTERNAL_PROCESSING_CONFIRMED must be true"
+            )
+
+        async def work(job: JobRecord) -> str:
+            as_of_date = _cutoff(store, None)
+            selected = _bearish_research_candidates(store, as_of_date)
+            if selected.empty:
+                result = {
+                    "run_id": job.job_id,
+                    "as_of_date": as_of_date.isoformat(),
+                    "kind": "bearish_screen",
+                    "cases": [],
+                    "message": (
+                        "No company met the strict adverse-evidence screen. "
+                        "No bearish conclusion was forced."
+                    ),
+                }
+                store.save_research_run(job.job_id, as_of_date, result)
+                job.message = result["message"]
+                store.upsert_job(job)
+                return job.job_id
+
+            builder = EvidencePacketBuilder(store)
+            graph = ResearchGraph(store, settings)
+            payloads = []
+            for index, row in enumerate(selected.itertuples(), start=1):
+                packet = builder.build(str(row.company_id), as_of_date, float(row.ml_score))
+                decision = await graph.run(packet, with_debate=True)
+                payloads.append(
+                    {
+                        "screen": {
+                            "bearish_signal_count": int(row.bearish_signal_count),
+                            "bearish_screen_score": float(row.bearish_screen_score),
+                        },
+                        "packet": packet.model_dump(mode="json"),
+                        "decision": decision.model_dump(mode="json"),
+                    }
+                )
+                job.progress = 0.1 + 0.8 * index / len(selected)
+                job.message = f"Completed {index}/{len(selected)} adverse-evidence research cases"
+                store.upsert_job(job)
+
+            result = {
+                "run_id": job.job_id,
+                "as_of_date": as_of_date.isoformat(),
+                "kind": "bearish_screen",
+                "cases": payloads,
+                "message": (
+                    "Bearish screen completed. Only Underweight or Sell consensus decisions "
+                    "appear in Debate."
+                ),
+            }
+            store.save_research_run(job.job_id, as_of_date, result)
+            return job.job_id
+
+        return app.state.jobs.submit("bearish_debate_screen", work)
+
     @app.get("/api/v1/research-runs/{run_id}")
     async def get_research_run(run_id: str):
         result = store.get_research_run(run_id)
@@ -735,9 +869,41 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             decisions = store.query_df(
                 "SELECT decision_json FROM consensus_decisions ORDER BY created_at DESC LIMIT 20"
             )
-            context["decisions"] = [
+            prepared_decisions = [
                 _prepare_decision(_json_value(value))
                 for value in decisions.get("decision_json", [])
+            ]
+            context["debate_sections"] = [
+                {
+                    "key": "long",
+                    "title": "Long candidates",
+                    "description": "Evidence-grounded Buy or Overweight conclusions only",
+                    "decisions": [
+                        decision
+                        for decision in prepared_decisions
+                        if decision.get("debate_bucket") == "long"
+                    ],
+                },
+                {
+                    "key": "bearish",
+                    "title": "Bearish candidates",
+                    "description": "Evidence-grounded Underweight or Sell conclusions only · not short orders",
+                    "decisions": [
+                        decision
+                        for decision in prepared_decisions
+                        if decision.get("debate_bucket") == "bearish"
+                    ],
+                },
+                {
+                    "key": "neutral",
+                    "title": "Neutral / watch",
+                    "description": "Hold conclusions with unresolved evidence or mixed signals",
+                    "decisions": [
+                        decision
+                        for decision in prepared_decisions
+                        if decision.get("debate_bucket") == "neutral"
+                    ],
+                },
             ]
         elif slug == "portfolio":
             context["portfolio"] = store.current_portfolio()
