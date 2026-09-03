@@ -9,20 +9,20 @@
   <link rel="stylesheet" href="{{ url_for('static', path='app.css') }}?v=20260903">
 </head>
 <body class="layout-fluid">
-  <aside class="sidebar navbar navbar-vertical navbar-expand-lg">
+  <aside class="sidebar">
     <div class="brand"><span>IQ</span><div>Institutional<br>Quant</div></div>
     <nav>
       <div class="nav-section-label">Research</div>
       {% for href, key, label in [
         ('/data-status','data-status','Data Status'),('/factor-lab','factor-lab','Factor Lab'),
         ('/research-runs','research-runs','Research Runs'),('/debate','debate','Debate')] %}
-        <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
+        <a href="{{ href }}" class="nav-item-link {% if slug == key %}active{% endif %}">{{ label }}</a>
       {% endfor %}
       <div class="nav-section-label nav-section-spacer">Portfolio</div>
       {% for href, key, label in [
         ('/portfolio','portfolio','Portfolio'),('/backtest','backtest','Backtest'),
         ('/paper-trading','paper-trading','Paper Trading')] %}
-        <a href="{{ href }}" class="nav-link {% if slug == key %}active{% endif %}">{{ label }}</a>
+        <a href="{{ href }}" class="nav-item-link {% if slug == key %}active{% endif %}">{{ label }}</a>
       {% endfor %}
     </nav>
     <div class="sidebar-note"><span class="dot"></span> Local app<br><small>Supabase · Alpaca paper only</small></div>
