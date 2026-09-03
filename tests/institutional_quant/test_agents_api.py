@@ -19,8 +19,11 @@ from institutional_quant.agents import (
 from institutional_quant.alpaca import AlpacaPaperClient
 from institutional_quant.api import create_app
 from institutional_quant.config import Settings
+from institutional_quant.rebalance import build_rebalance_advice
 from institutional_quant.schemas import (
     AnalystView,
+    BacktestResult,
+    BacktestSpec,
     ConsensusDecision,
     DebateTurn,
     EvidenceClaim,
@@ -30,6 +33,7 @@ from institutional_quant.schemas import (
     PortfolioPosition,
     PortfolioRecommendation,
     Rating,
+    StrategyMetrics,
 )
 from institutional_quant.storage import DuckDBStore
 
@@ -330,6 +334,191 @@ def test_held_portfolio_is_rendered_as_reference_not_a_trade_recommendation(tmp_
     assert "No new portfolio action is recommended" in page.text
     assert "Prior model target (reference only)" in page.text
     assert "Not recalculated" in page.text
+
+
+def test_backtest_page_explains_crossing_lines_with_risk_metrics(tmp_path) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-backtest.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+    )
+    metric_defaults = {
+        "annualized_volatility": 0.14,
+        "sortino_zero_rf": 1.1,
+        "beta": 0.9,
+        "information_ratio": 0.3,
+        "average_one_way_turnover": 0.08,
+        "monthly_hit_rate": 0.6,
+        "observations": 3,
+    }
+    with TestClient(create_app(settings)) as client:
+        client.app.state.store.save_backtest(
+            BacktestResult(
+                spec=BacktestSpec(transaction_cost_bps=10),
+                certified_point_in_time=True,
+                certification_notes=[],
+                metrics=[
+                    StrategyMetrics(strategy="SPY buy-and-hold", cagr=0.10, sharpe_zero_rf=0.7, max_drawdown=-0.20, **metric_defaults),
+                    StrategyMetrics(strategy="factor_only", cagr=0.14, sharpe_zero_rf=0.9, max_drawdown=-0.24, **metric_defaults),
+                    StrategyMetrics(strategy="ml_only", cagr=0.12, sharpe_zero_rf=1.1, max_drawdown=-0.16, **metric_defaults),
+                ],
+                monthly_returns=[
+                    {"date": "2026-01-31", "spy": 0.01, "factor_only": 0.03, "ml_only": 0.02},
+                    {"date": "2026-02-28", "spy": -0.01, "factor_only": 0.02, "ml_only": -0.01},
+                    {"date": "2026-03-31", "spy": 0.02, "factor_only": 0.01, "ml_only": 0.03},
+                ],
+                factor_ic=[],
+                statistical_tests=[
+                    {"strategy": "factor_only", "annualized_alpha": 0.04, "alpha_t_stat": 1.4},
+                    {"strategy": "ml_only", "annualized_alpha": 0.02, "alpha_t_stat": 0.9},
+                ],
+            )
+        )
+        page = client.get("/backtest")
+
+    assert page.status_code == 200
+    assert "Conclusion summary" in page.text
+    assert "No single strategy dominated" in page.text
+    assert "Strategy comparison" in page.text
+    assert "Lines crossing is normal" in page.text
+    assert "Factor-only" in page.text
+
+
+def test_my_holdings_keeps_watchlist_and_paper_sync_read_only(tmp_path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/account":
+            return httpx.Response(200, json={"status": "ACTIVE", "equity": "12000", "cash": "4000"})
+        if request.url.path == "/v2/positions":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "symbol": "AAPL",
+                        "qty": "3",
+                        "current_price": "200",
+                        "market_value": "600",
+                        "unrealized_pl": "20",
+                    }
+                ],
+            )
+        if request.url.path == "/v2/orders":
+            return httpx.Response(200, json=[])
+        return httpx.Response(404)
+
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-holdings.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+        alpaca_paper_key="key",
+        alpaca_paper_secret="secret",
+    )
+    with TestClient(create_app(settings)) as client:
+        page = client.get("/my-holdings")
+        assert page.status_code == 200
+        assert "Model targets and brokerage holdings are separate" in page.text
+        assert "No brokerage data loaded" in page.text
+        assert "Generate advice from synced holdings" in page.text
+        assert "Research proposal · paper only · no order authority" in page.text
+
+        created = client.post("/api/v1/watchlist", json={"ticker": "aapl", "note": "Review earnings"})
+        assert created.status_code == 201
+        assert created.json()["item"]["ticker"] == "AAPL"
+        updated = client.post("/api/v1/watchlist", json={"ticker": "AAPL", "note": "Review guidance"})
+        assert updated.status_code == 201
+        assert client.get("/api/v1/watchlist").json()["items"] == [
+            {"ticker": "AAPL", "note": "Review guidance", "created_at": created.json()["item"]["created_at"]}
+        ]
+
+        client.app.state.alpaca = AlpacaPaperClient(
+            settings, transport=httpx.MockTransport(handler)
+        )
+        synchronized = client.get("/api/v1/holdings/alpaca-paper")
+        assert synchronized.status_code == 200
+        assert synchronized.json()["paper_only"] is True
+        assert synchronized.json()["positions"][0]["symbol"] == "AAPL"
+
+        deleted = client.delete("/api/v1/watchlist/AAPL")
+        assert deleted.status_code == 200
+        assert client.get("/api/v1/watchlist").json()["items"] == []
+
+
+def test_rebalance_advice_stages_concentration_reduction_and_explains_evidence() -> None:
+    ranked = pd.DataFrame(
+        [
+            {
+                "ticker": "AAPL",
+                "sector": "Information Technology",
+                "operational_score": 0.91,
+                "factor_score": 1.2,
+                "ml_score": 0.7,
+                "factor_value": 0.3,
+                "factor_quality": 0.8,
+                "price_to_earnings": 20.0,
+                "roic": 0.23,
+            },
+            {
+                "ticker": "MSFT",
+                "sector": "Information Technology",
+                "operational_score": 0.35,
+                "factor_score": 0.2,
+                "ml_score": 0.2,
+                "factor_value": -0.1,
+            },
+        ]
+    )
+    target = pd.DataFrame(
+        [
+            {"company_id": "AAPL", "ticker": "AAPL", "sector": "Information Technology", "weight": 0.05, "score": 0.91},
+            {"company_id": "MSFT", "ticker": "MSFT", "sector": "Information Technology", "weight": 0.05, "score": 0.35},
+        ]
+    )
+    advice = build_rebalance_advice(
+        ranked,
+        target,
+        [{"symbol": "MSFT", "qty": 8.0, "current_price": 100.0, "market_value": 800.0}],
+        1_000.0,
+        {"AAPL": 50.0, "MSFT": 100.0},
+        as_of_date=date(2026, 9, 1),
+        reference_price_date="2026-09-01",
+    )
+
+    reductions = [action for action in advice["actions"] if action["action"] == "Reduce"]
+    additions = [action for action in advice["actions"] if action["action"] == "Initiate"]
+    assert reductions[0]["ticker"] == "MSFT"
+    assert reductions[0]["proposed_notional"] <= 200.0
+    assert additions[0]["ticker"] == "AAPL"
+    assert additions[0]["proposed_shares"] == 1.0
+    assert {item["label"] for item in additions[0]["evidence"]} >= {"P/E", "ROIC"}
+    assert advice["max_name_weight"] == 0.05
+    assert any("not an order" in warning for warning in advice["warnings"])
+
+
+def test_rebalance_advice_endpoint_uses_submitted_snapshot_without_broker_call(tmp_path, monkeypatch) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-advice.duckdb",
+        raw_data_dir=tmp_path / "raw",
+    )
+
+    def fake_advice(store, positions, equity):
+        assert positions == [{"symbol": "AAPL", "qty": 2.0, "current_price": 100.0, "market_value": 200.0}]
+        assert equity == 1_000.0
+        return {"as_of_date": "2026-09-01", "actions": [], "warnings": []}
+
+    monkeypatch.setattr("institutional_quant.api.generate_rebalance_advice", fake_advice)
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/holdings/rebalance-advice",
+            json={
+                "equity": 1_000,
+                "positions": [{"symbol": "aapl", "qty": 2, "current_price": 100, "market_value": 200}],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["as_of_date"] == "2026-09-01"
 
 
 def test_alpaca_preview_requires_unchanged_explicit_approval() -> None:

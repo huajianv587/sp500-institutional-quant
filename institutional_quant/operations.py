@@ -30,7 +30,7 @@ def _cutoff(store: Store, requested: date | None) -> date:
         store.latest_available_date(table)
         for table in ("fundamentals", "estimates", "market_returns")
     ]
-    candidates = [value for value in candidates if value is not None]
+    candidates = [pd.Timestamp(value).date() for value in candidates if value is not None]
     if not candidates:
         latest = store.price_coverage()[1]
         if latest is None:

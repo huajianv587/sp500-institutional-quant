@@ -189,6 +189,48 @@ class BacktestSpec(BaseModel):
         return self
 
 
+class WatchlistItemRequest(BaseModel):
+    ticker: str = Field(min_length=1, max_length=12)
+    note: str | None = Field(default=None, max_length=240)
+
+    @field_validator("ticker")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized or not all(char.isalnum() or char in {".", "-"} for char in normalized):
+            raise ValueError("ticker may contain only letters, numbers, periods and hyphens")
+        return normalized
+
+    @field_validator("note")
+    @classmethod
+    def normalize_note(cls, value: str | None) -> str | None:
+        return value.strip() or None if value else None
+
+
+class BrokerHoldingInput(BaseModel):
+    """A point-in-time, read-only broker position supplied by the browser."""
+
+    symbol: str = Field(min_length=1, max_length=12)
+    qty: float = Field(ge=0.0)
+    current_price: float = Field(ge=0.0)
+    market_value: float = Field(ge=0.0)
+
+    @field_validator("symbol")
+    @classmethod
+    def normalize_symbol(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if not normalized or not all(char.isalnum() or char in {".", "-"} for char in normalized):
+            raise ValueError("symbol may contain only letters, numbers, periods and hyphens")
+        return normalized
+
+
+class RebalanceAdviceRequest(BaseModel):
+    """Explicitly submitted paper-broker snapshot for a research-only plan."""
+
+    equity: float = Field(gt=0.0)
+    positions: list[BrokerHoldingInput] = Field(default_factory=list, max_length=500)
+
+
 class StrategyMetrics(BaseModel):
     strategy: str
     cagr: float

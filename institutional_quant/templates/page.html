@@ -20,7 +20,7 @@
       {% endfor %}
       <div class="nav-section-label nav-section-spacer">Portfolio</div>
       {% for href, key, label in [
-        ('/portfolio','portfolio','Portfolio'),('/backtest','backtest','Backtest'),
+        ('/portfolio','portfolio','Portfolio'),('/my-holdings','my-holdings','My Holdings'),('/backtest','backtest','Backtest'),
         ('/paper-trading','paper-trading','Paper Trading')] %}
         <a href="{{ href }}" class="nav-item-link {% if slug == key %}active{% endif %}">{{ label }}</a>
       {% endfor %}
@@ -191,10 +191,83 @@
       </tbody></table>
     </section>
 
+    {% elif slug == 'my-holdings' %}
+    <section class="warning holdings-boundary"><b>Read-only account view</b><p>Model targets and brokerage holdings are separate. This page never creates orders; the Alpaca action reads your paper account only when you request a sync.</p></section>
+    <section class="grid stats holdings-stats">
+      <article><p>Broker source</p><strong>Alpaca paper</strong><small>Read-only on demand</small></article>
+      <article><p>Account equity</p><strong id="holding-equity">Not synchronized</strong><small id="holding-account-status">No account data loaded</small></article>
+      <article><p>Open positions</p><strong id="holding-position-count">—</strong><small>From the last requested sync</small></article>
+      <article><p>Live broker</p><strong>Not connected</strong><small>Future adapters will be read-only</small></article>
+    </section>
+    <section class="panel">
+      <div class="panel-title"><h2>Alpaca paper holdings</h2><span>Manual sync · no order authority</span></div>
+      <div class="holdings-actions"><button id="holdings-sync" class="btn btn-outline-primary">Sync Alpaca paper holdings</button><span>Reads account, positions and recent order state. It does not submit, modify or cancel orders.</span></div>
+      <pre id="holdings-result" class="import-result">No brokerage data loaded. Select Sync Alpaca paper holdings when you want to refresh this view.</pre>
+      <div class="table-scroll"><table class="table table-vcenter holdings-table"><thead><tr><th>Symbol</th><th>Quantity</th><th>Current price</th><th>Market value</th><th>Unrealized P/L</th></tr></thead><tbody id="holdings-rows"><tr><td colspan="5" class="empty">No brokerage positions loaded.</td></tr></tbody></table></div>
+    </section>
+    <section class="panel rebalance-panel">
+      <div class="panel-title"><h2>Rebalance advice</h2><span>Research proposal · paper only · no order authority</span></div>
+      <div class="holdings-actions"><button id="rebalance-generate" class="btn btn-primary" disabled>Generate advice from synced holdings</button><span>Combines the synchronized paper snapshot with the latest certified factor, ML, sector and reference-price data. It creates no order.</span></div>
+      <pre id="rebalance-result" class="import-result">Sync your Alpaca paper holdings first. Then generate a staged, score-ranked research proposal.</pre>
+      <div id="rebalance-output" hidden>
+        <div class="grid rebalance-stats">
+          <article><p>Model target</p><strong id="advice-target-holdings">—</strong><small>Names · maximum 5% each</small></article>
+          <article><p>Monthly staging budget</p><strong id="advice-turnover">—</strong><small>One-way turnover cap</small></article>
+          <article><p>Signal stack</p><strong id="advice-signal" class="small-strong">—</strong><small id="advice-as-of">Certified cutoff</small></article>
+        </div>
+        <section class="advice-section">
+          <div class="advice-section-title"><h3>Priority actions</h3><span id="advice-price-date">Reference prices</span></div>
+          <div class="table-scroll"><table class="table advice-table"><thead><tr><th>Priority</th><th>Action</th><th>Ticker</th><th>Sector</th><th>Current → target</th><th>Proposed shares</th><th>Reference price</th><th>Score</th><th>Evidence</th></tr></thead><tbody id="advice-actions"></tbody></table></div>
+        </section>
+        <section class="advice-section">
+          <div class="advice-section-title"><h3>Sector allocation</h3><span>Current exposure versus constrained target</span></div>
+          <div class="table-scroll"><table class="table"><thead><tr><th>Sector</th><th>Current</th><th>Target</th><th>Difference</th></tr></thead><tbody id="advice-sectors"></tbody></table></div>
+        </section>
+        <section class="advice-section advice-notes"><h3>How to read this proposal</h3><ul id="advice-warnings"></ul></section>
+      </div>
+    </section>
+    <section class="panel watchlist-panel">
+      <div class="panel-title"><h2>My watchlist</h2><span>Personal research queue · separate from holdings</span></div>
+      <form id="watchlist-form" class="watchlist-form">
+        <label>Ticker<input id="watchlist-ticker" maxlength="12" placeholder="e.g. NVDA" required></label>
+        <label>Research note <input id="watchlist-note" maxlength="240" placeholder="Optional thesis or question"></label>
+        <button class="btn btn-primary" type="submit">Add to watchlist</button>
+      </form>
+      <pre id="watchlist-result" class="import-result">Watchlist items stay in the platform database and never create an order.</pre>
+      <div class="table-scroll"><table class="table table-vcenter"><thead><tr><th>Ticker</th><th>Research note</th><th>Added</th><th></th></tr></thead><tbody id="watchlist-rows">
+      {% for item in watchlist %}<tr><td><b>{{ item.ticker }}</b></td><td>{{ item.note or '—' }}</td><td>{{ item.created_at }}</td><td><button class="watchlist-remove" data-ticker="{{ item.ticker }}" type="button" aria-label="Remove {{ item.ticker }} from watchlist">Remove</button></td></tr>
+      {% else %}<tr><td colspan="4" class="empty">Add a ticker to create your personal research queue.</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+
     {% elif slug == 'backtest' %}
+    {% if backtest_analysis %}
+    <section class="panel backtest-conclusion">
+      <div class="panel-title"><h2>Conclusion summary</h2><span>Historical, after costs · not a trade instruction</span></div>
+      <div class="conclusion-copy"><b>{{ backtest_analysis.conclusion }}</b><p>Higher ending wealth is useful, but it is not enough on its own. The comparison below separates return, drawdown, risk-adjusted performance and implementation cost.</p></div>
+      <div class="grid conclusion-stats">
+        <article><p>Highest ending wealth</p><strong>{{ backtest_analysis.return_leader.label }}</strong><small>${{ '%.2f'|format(backtest_analysis.return_leader.ending_wealth) }} from $1</small></article>
+        <article><p>Best risk-adjusted return</p><strong>{{ backtest_analysis.risk_leader.label }}</strong><small>Sharpe {{ '%.2f'|format(backtest_analysis.risk_leader.sharpe) }}</small></article>
+        <article><p>Smallest drawdown</p><strong>{{ backtest_analysis.drawdown_leader.label }}</strong><small>{{ '%.1f%%'|format(backtest_analysis.drawdown_leader.max_drawdown * 100) }} maximum drawdown</small></article>
+      </div>
+    </section>
+    {% endif %}
     <section class="panel"><div class="panel-title"><h2>Walk-forward performance</h2><span>Next-session execution · costs included</span></div>
       {% if chart %}<div class="chart">{{ chart|safe }}</div>{% else %}<div class="empty large">Run a point-in-time backtest to populate this chart.</div>{% endif %}
     </section>
+    {% if backtest_analysis %}
+    <section class="panel backtest-analysis">
+      <div class="panel-title"><h2>Strategy comparison</h2><span>{{ backtest_analysis.window }} · {{ backtest_analysis.observations }} out-of-sample months</span></div>
+      <div class="table-scroll"><table class="table table-vcenter"><thead><tr><th>Strategy</th><th>Ending $1</th><th>CAGR</th><th>Vs SPY</th><th>Volatility</th><th>Max DD</th><th>Sharpe</th><th>Information ratio</th><th>Turnover</th><th>Alpha t-stat</th></tr></thead><tbody>
+      {% for row in backtest_analysis.rows %}<tr><td><b>{{ row.label }}</b></td><td>{{ '$%.2f'|format(row.ending_wealth) if row.ending_wealth is not none else '—' }}</td><td>{{ '%.1f%%'|format(row.cagr * 100) }}</td><td>{% if row.strategy == 'SPY buy-and-hold' %}Benchmark{% else %}{{ '%+.1f%%'|format(row.cagr_vs_spy * 100) }}{% endif %}</td><td>{{ '%.1f%%'|format(row.annualized_volatility * 100) }}</td><td>{{ '%.1f%%'|format(row.max_drawdown * 100) }}</td><td>{{ '%.2f'|format(row.sharpe) }}</td><td>{{ '%.2f'|format(row.information_ratio) }}</td><td>{{ '%.1f%%'|format(row.turnover * 100) }}</td><td>{{ '%.2f'|format(row.alpha_t_stat) if row.alpha_t_stat is not none else '—' }}</td></tr>{% endfor %}
+      </tbody></table></div>
+    </section>
+    <section class="grid backtest-notes">
+      <article><p>How to read the chart</p><b>Lines crossing is normal.</b><small>A strategy can lead in one market regime and lag in another. Use ending wealth to compare the full window, then use Sharpe and drawdown to judge whether the path was acceptable.</small></article>
+      <article><p>Risk and implementation</p><b>Lower drawdown and turnover matter.</b><small>Max DD measures the worst historical peak-to-trough loss. Turnover is the average one-way monthly trading required; all displayed returns already include {{ '%.0f'|format(backtest_analysis.cost_bps) }} bps costs.</small></article>
+      <article><p>Evidence quality</p><b>{{ 'Point-in-time certified' if backtest_analysis.certified else 'Not certified' }}.</b><small>Alpha t-stat is an indication of statistical strength, not proof. Prefer repeated out-of-sample windows and stable results before paper deployment.</small></article>
+    </section>
+    {% endif %}
     <section class="panel"><div class="panel-title"><h2>Completed studies</h2><span>No performance target is forced</span></div>
       <table class="table table-vcenter"><thead><tr><th>ID</th><th>Window</th><th>Cost</th><th>Certified</th></tr></thead><tbody>
       {% for row in backtests %}<tr><td class="mono">{{ row.backtest_id }}</td><td>{{ row.spec.start_date }} → {{ row.spec.end_date }}</td><td>{{ row.spec.transaction_cost_bps }} bps</td><td>{{ row.certified_point_in_time }}</td></tr>
@@ -298,6 +371,135 @@
           }
         } catch (error) { result.textContent = String(error); result.className = 'import-result failed'; }
       });
+    });
+  </script>
+  {% endif %}
+  {% if slug == 'my-holdings' %}
+  <script>
+    const holdingsResult = document.getElementById('holdings-result');
+    const holdingsRows = document.getElementById('holdings-rows');
+    const watchlistRows = document.getElementById('watchlist-rows');
+    const rebalanceGenerate = document.getElementById('rebalance-generate');
+    const rebalanceResult = document.getElementById('rebalance-result');
+    const rebalanceOutput = document.getElementById('rebalance-output');
+    let brokerSnapshot = null;
+    const money = (value) => Number(value || 0).toLocaleString(undefined, {style: 'currency', currency: 'USD'});
+    const number = (value) => Number(value || 0).toLocaleString(undefined, {maximumFractionDigits: 4});
+    const escapeHtml = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+    const renderHoldings = (positions) => {
+      if (!positions.length) {
+        holdingsRows.innerHTML = '<tr><td colspan="5" class="empty">No open paper positions were returned.</td></tr>';
+        return;
+      }
+      holdingsRows.innerHTML = positions.map((position) => `<tr><td><b>${escapeHtml(position.symbol)}</b></td><td>${number(position.qty)}</td><td>${money(position.current_price)}</td><td>${money(position.market_value)}</td><td>${money(position.unrealized_pl)}</td></tr>`).join('');
+    };
+    const renderWatchlist = (items) => {
+      if (!items.length) {
+        watchlistRows.innerHTML = '<tr><td colspan="4" class="empty">Add a ticker to create your personal research queue.</td></tr>';
+        return;
+      }
+      watchlistRows.innerHTML = items.map((item) => `<tr><td><b>${escapeHtml(item.ticker)}</b></td><td>${escapeHtml(item.note || '—')}</td><td>${escapeHtml(item.created_at)}</td><td><button class="watchlist-remove" data-ticker="${escapeHtml(item.ticker)}" type="button" aria-label="Remove ${escapeHtml(item.ticker)} from watchlist">Remove</button></td></tr>`).join('');
+    };
+    const refreshWatchlist = async () => {
+      const response = await fetch('/api/v1/watchlist');
+      const payload = await response.json();
+      if (response.ok) renderWatchlist(payload.items || []);
+    };
+    const percent = (value) => `${(Number(value || 0) * 100).toFixed(1)}%`;
+    const actionClass = (action) => action === 'Reduce' ? 'advice-action reduce' : 'advice-action add';
+    const renderAdvice = (advice) => {
+      document.getElementById('advice-target-holdings').textContent = advice.target_holdings || '—';
+      document.getElementById('advice-turnover').textContent = percent(advice.monthly_turnover_budget);
+      document.getElementById('advice-signal').textContent = advice.model_signal || '—';
+      document.getElementById('advice-as-of').textContent = `Certified cutoff: ${advice.as_of_date || '—'}`;
+      document.getElementById('advice-price-date').textContent = advice.reference_price_date ? `Reference prices: ${advice.reference_price_date}` : 'Reference prices unavailable';
+      const actions = advice.actions || [];
+      document.getElementById('advice-actions').innerHTML = actions.length ? actions.map((item, index) => {
+        const evidence = (item.evidence || []).slice(0, 4).map((entry) => `<span class="evidence-chip">${escapeHtml(entry.label)} ${escapeHtml(entry.value)}</span>`).join('');
+        return `<tr><td>${index + 1}</td><td><span class="${actionClass(item.action)}">${escapeHtml(item.action)}</span></td><td><b>${escapeHtml(item.ticker)}</b><small class="advice-reason">${escapeHtml(item.reason)}</small></td><td>${escapeHtml(item.sector)}</td><td>${percent(item.current_weight)} → ${percent(item.target_weight)}</td><td>${item.proposed_shares == null ? '—' : number(item.proposed_shares)}</td><td>${item.reference_price ? money(item.reference_price) : '—'}</td><td>#${item.rank} · ${Number(item.operational_score || 0).toFixed(3)}</td><td><div class="evidence-strip compact">${evidence || '—'}</div></td></tr>`;
+      }).join('') : '<tr><td colspan="9" class="empty">No staged changes are needed under the current constraints.</td></tr>';
+      const sectors = advice.current_sector_weights || [];
+      document.getElementById('advice-sectors').innerHTML = sectors.map((item) => `<tr><td><b>${escapeHtml(item.sector)}</b></td><td>${percent(item.current_weight)}</td><td>${percent(item.target_weight)}</td><td>${item.difference >= 0 ? '+' : ''}${percent(item.difference)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">Sector coverage is unavailable.</td></tr>';
+      document.getElementById('advice-warnings').innerHTML = (advice.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join('');
+      rebalanceOutput.hidden = false;
+    };
+    document.getElementById('holdings-sync').addEventListener('click', async () => {
+      holdingsResult.textContent = 'Reading Alpaca paper account and positions…';
+      holdingsResult.className = 'import-result';
+      const response = await fetch('/api/v1/holdings/alpaca-paper');
+      const payload = await response.json();
+      if (!response.ok) {
+        holdingsResult.textContent = `Paper account is unavailable: ${payload.detail || 'request failed'}.`;
+        holdingsResult.className = 'import-result failed';
+        return;
+      }
+      const positions = payload.positions || [];
+      document.getElementById('holding-equity').textContent = money(payload.account?.equity);
+      document.getElementById('holding-account-status').textContent = payload.account?.status || 'Synchronized';
+      document.getElementById('holding-position-count').textContent = positions.length;
+      renderHoldings(positions);
+      brokerSnapshot = {equity: Number(payload.account?.equity || 0), positions: positions.map((position) => ({symbol: position.symbol, qty: Number(position.qty || 0), current_price: Number(position.current_price || 0), market_value: Number(position.market_value || 0)}))};
+      rebalanceGenerate.disabled = !(brokerSnapshot.equity > 0);
+      rebalanceOutput.hidden = true;
+      rebalanceResult.textContent = brokerSnapshot.equity > 0 ? 'Holdings are ready. Generate advice to evaluate sector exposure, model targets and score-ranked staged changes.' : 'Advice needs a positive account equity from the paper-account sync.';
+      rebalanceResult.className = brokerSnapshot.equity > 0 ? 'import-result' : 'import-result failed';
+      holdingsResult.textContent = `Alpaca paper account synchronized at ${new Date(payload.synchronized_at).toLocaleString()}. ${positions.length} open position(s) loaded; no order action was taken.`;
+      holdingsResult.className = 'import-result ok';
+    });
+    rebalanceGenerate.addEventListener('click', async () => {
+      if (!brokerSnapshot) return;
+      rebalanceGenerate.disabled = true;
+      rebalanceResult.textContent = 'Building a constrained research proposal from this synchronized snapshot…';
+      rebalanceResult.className = 'import-result';
+      try {
+        const response = await fetch('/api/v1/holdings/rebalance-advice', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(brokerSnapshot)});
+        const payload = await response.json();
+        if (!response.ok) {
+          rebalanceResult.textContent = `Advice unavailable: ${payload.detail || 'request failed'}.`;
+          rebalanceResult.className = 'import-result failed';
+          return;
+        }
+        renderAdvice(payload);
+        rebalanceResult.textContent = `Research proposal ready from the ${payload.as_of_date} certified snapshot. Review every action and its evidence before creating any separate paper-order preview.`;
+        rebalanceResult.className = 'import-result ok';
+      } catch (error) {
+        rebalanceResult.textContent = String(error);
+        rebalanceResult.className = 'import-result failed';
+      } finally {
+        rebalanceGenerate.disabled = !brokerSnapshot || !(brokerSnapshot.equity > 0);
+      }
+    });
+    document.getElementById('watchlist-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const result = document.getElementById('watchlist-result');
+      const ticker = document.getElementById('watchlist-ticker').value;
+      const note = document.getElementById('watchlist-note').value;
+      const response = await fetch('/api/v1/watchlist', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticker, note})});
+      const payload = await response.json();
+      if (!response.ok) {
+        result.textContent = `Watchlist update blocked: ${payload.detail || 'request failed'}.`;
+        result.className = 'import-result failed';
+        return;
+      }
+      event.currentTarget.reset();
+      await refreshWatchlist();
+      result.textContent = `${payload.item.ticker} is in your watchlist. This does not create a portfolio position or an order.`;
+      result.className = 'import-result ok';
+    });
+    watchlistRows.addEventListener('click', async (event) => {
+      const button = event.target.closest('.watchlist-remove');
+      if (!button) return;
+      const response = await fetch(`/api/v1/watchlist/${encodeURIComponent(button.dataset.ticker)}`, {method: 'DELETE'});
+      const payload = await response.json();
+      const result = document.getElementById('watchlist-result');
+      if (!response.ok) {
+        result.textContent = `Watchlist update blocked: ${payload.detail || 'request failed'}.`;
+        result.className = 'import-result failed';
+        return;
+      }
+      await refreshWatchlist();
+      result.textContent = `${payload.deleted} was removed from the watchlist.`;
+      result.className = 'import-result ok';
     });
   </script>
   {% endif %}

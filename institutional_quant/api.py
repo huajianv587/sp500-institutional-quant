@@ -36,6 +36,7 @@ from .operations import (
     run_weekly,
 )
 from .portfolio import PortfolioOptimizer
+from .rebalance import generate_rebalance_advice
 from .reports import write_backtest_report
 from .scheduler import OperationalScheduler
 from .schemas import (
@@ -46,7 +47,9 @@ from .schemas import (
     OperationRequest,
     PaperOrderPreviewRequest,
     PaperOrderSubmitRequest,
+    RebalanceAdviceRequest,
     ResearchRunRequest,
+    WatchlistItemRequest,
 )
 from .storage import Store, create_store
 
@@ -63,9 +66,7 @@ def _json_value(value: Any) -> Any:
 
 
 _EVIDENCE_TOKEN = re.compile(r"src_[0-9a-z]+:[a-z0-9_]+", re.IGNORECASE)
-_EVIDENCE_BLOCK = re.compile(
-    r"\[(?:\s*src_[^,\]\s]+:[^,\]\s]+\s*,?)+\]", re.IGNORECASE
-)
+_EVIDENCE_BLOCK = re.compile(r"\[(?:\s*src_[^,\]\s]+:[^,\]\s]+\s*,?)+\]", re.IGNORECASE)
 
 
 def _field_label(field: str) -> str:
@@ -88,6 +89,101 @@ def _field_label(field: str) -> str:
         "sp_norm_eps_act_or_est": "S&P Norm EPS",
     }
     return labels.get(field, field.replace("_", " ").strip().title())
+
+
+_BACKTEST_STRATEGY_COLUMNS = {
+    "SPY buy-and-hold": "spy",
+    "Equal-weight historical universe": "equal_weight_universe",
+}
+
+
+def _display_strategy_name(strategy: str) -> str:
+    """Keep stored strategy identifiers readable without changing their contracts."""
+    labels = {
+        "spy": "SPY",
+        "equal_weight_universe": "Equal-weight S&P 500",
+        "SPY buy-and-hold": "SPY buy-and-hold",
+        "Equal-weight historical universe": "Equal-weight S&P 500",
+        "factor_only": "Factor-only",
+        "ml_only": "ML-only",
+        "factor_ml_ensemble": "Factor + ML ensemble",
+        "ensemble_agent_overlay": "Ensemble + agent overlay",
+    }
+    return labels.get(strategy, strategy.replace("_", " ").title())
+
+
+def _backtest_analysis(result) -> dict[str, Any]:
+    """Turn stored backtest metrics into an auditable reader-facing comparison."""
+    metric_by_strategy = {metric.strategy: metric for metric in result.metrics}
+    spy = metric_by_strategy.get("SPY buy-and-hold")
+    alpha_tests = {
+        str(row["strategy"]): row
+        for row in result.statistical_tests
+        if isinstance(row, dict) and "strategy" in row
+    }
+    frame = pd.DataFrame(result.monthly_returns)
+    rows: list[dict[str, Any]] = []
+    for metric in result.metrics:
+        column = _BACKTEST_STRATEGY_COLUMNS.get(metric.strategy, metric.strategy)
+        returns = pd.to_numeric(frame.get(column, pd.Series(dtype=float)), errors="coerce").dropna()
+        ending_wealth = float((1 + returns).prod()) if not returns.empty else None
+        alpha = alpha_tests.get(metric.strategy, {})
+        rows.append(
+            {
+                "strategy": metric.strategy,
+                "label": _display_strategy_name(metric.strategy),
+                "ending_wealth": ending_wealth,
+                "cagr": metric.cagr,
+                "cagr_vs_spy": metric.cagr - spy.cagr if spy else None,
+                "annualized_volatility": metric.annualized_volatility,
+                "max_drawdown": metric.max_drawdown,
+                "sharpe": metric.sharpe_zero_rf,
+                "sortino": metric.sortino_zero_rf,
+                "information_ratio": metric.information_ratio,
+                "beta": metric.beta,
+                "turnover": metric.average_one_way_turnover,
+                "monthly_hit_rate": metric.monthly_hit_rate,
+                "annualized_alpha": alpha.get("annualized_alpha"),
+                "alpha_t_stat": alpha.get("alpha_t_stat"),
+                "observations": metric.observations,
+            }
+        )
+
+    candidates = [row for row in rows if row["strategy"] != "SPY buy-and-hold"]
+    if not candidates:
+        return {
+            "rows": rows,
+            "conclusion": None,
+            "return_leader": None,
+            "risk_leader": None,
+            "drawdown_leader": None,
+        }
+    return_leader = max(candidates, key=lambda row: row["ending_wealth"] or float("-inf"))
+    risk_leader = max(candidates, key=lambda row: row["sharpe"])
+    drawdown_leader = max(candidates, key=lambda row: row["max_drawdown"])
+    if return_leader["strategy"] == risk_leader["strategy"]:
+        conclusion = (
+            f"{return_leader['label']} led this historical window on both ending wealth "
+            "and risk-adjusted return. Review drawdown, turnover and out-of-sample "
+            "stability before treating it as a deployment candidate."
+        )
+    else:
+        conclusion = (
+            f"No single strategy dominated: {return_leader['label']} finished with the "
+            f"highest ending wealth, while {risk_leader['label']} had the strongest "
+            "risk-adjusted return. The crossing lines reflect those trade-offs."
+        )
+    return {
+        "rows": rows,
+        "conclusion": conclusion,
+        "return_leader": return_leader,
+        "risk_leader": risk_leader,
+        "drawdown_leader": drawdown_leader,
+        "window": f"{result.spec.start_date} to {result.spec.end_date}",
+        "cost_bps": result.spec.transaction_cost_bps,
+        "certified": result.certified_point_in_time,
+        "observations": max((row["observations"] for row in rows), default=0),
+    }
 
 
 def _prepare_decision(value: Any) -> Any:
@@ -236,6 +332,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     async def health():
         return {"status": "ok", "database": settings.database_backend, "paper_trading_only": True}
+
+    def list_watchlist_items() -> list[dict[str, Any]]:
+        frame = store.query_df(
+            "SELECT ticker, note, created_at FROM watchlist_items ORDER BY ticker"
+        )
+        return frame.to_dict(orient="records")
+
+    @app.get("/api/v1/watchlist")
+    async def get_watchlist():
+        return {"items": list_watchlist_items()}
+
+    @app.post("/api/v1/watchlist", status_code=201)
+    async def add_watchlist_item(request: WatchlistItemRequest):
+        store.execute(
+            """
+            INSERT INTO watchlist_items (ticker, note, created_at) VALUES (?, ?, ?)
+            ON CONFLICT (ticker) DO UPDATE SET note=EXCLUDED.note
+            """,
+            [request.ticker, request.note, datetime.utcnow()],
+        )
+        return {
+            "item": next(
+                item for item in list_watchlist_items() if item["ticker"] == request.ticker
+            )
+        }
+
+    @app.delete("/api/v1/watchlist/{ticker}")
+    async def remove_watchlist_item(ticker: str):
+        try:
+            normalized = WatchlistItemRequest(ticker=ticker).ticker
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        store.execute("DELETE FROM watchlist_items WHERE ticker = ?", [normalized])
+        return {"deleted": normalized}
 
     @app.post("/api/v1/imports/ciq")
     async def import_ciq(
@@ -441,10 +571,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except (RuntimeError, ValueError, httpx.HTTPError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/api/v1/holdings/alpaca-paper")
+    async def alpaca_paper_holdings():
+        """Read-only paper brokerage telemetry for the My Holdings page."""
+        try:
+            return await app.state.alpaca.synchronize()
+        except (RuntimeError, ValueError, httpx.HTTPError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/v1/holdings/rebalance-advice")
+    async def holdings_rebalance_advice(request: RebalanceAdviceRequest):
+        """Turn an explicitly synchronized paper snapshot into a non-executable plan."""
+        try:
+            return await asyncio.to_thread(
+                generate_rebalance_advice,
+                store,
+                [position.model_dump() for position in request.positions],
+                request.equity,
+            )
+        except (ValueError, ArithmeticError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     def submit_operation(kind: str, request: OperationRequest):
         async def work(job: JobRecord) -> str:
             if kind == "daily":
-                result = await run_daily(store, settings, request.as_of_date, client=app.state.alpaca)
+                result = await run_daily(
+                    store, settings, request.as_of_date, client=app.state.alpaca
+                )
             elif kind == "weekly":
                 result = await run_weekly(store, settings, request.as_of_date)
             elif kind == "monthly":
@@ -521,6 +674,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "certified": False,
             "certification_notes": [],
             "chart": "",
+            "backtest_analysis": None,
+            "watchlist": [],
         }
         if slug == "data-status":
             context["sources"] = store.source_status()
@@ -541,9 +696,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if value is not None
             ]
             factor_date = (
-                min(max(available_factor_dates), date.today())
-                if available_factor_dates
-                else None
+                min(max(available_factor_dates), date.today()) if available_factor_dates else None
             )
             if factor_date:
                 try:
@@ -565,12 +718,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             for column in family_columns
                         },
                     }
-                    factors = snapshot.dropna(subset=["factor_score"]).nlargest(
-                        25, "factor_score"
+                    factors = snapshot.dropna(subset=["factor_score"]).nlargest(25, "factor_score")
+                    context["factors"] = factors[["ticker", "sector", "factor_score"]].to_dict(
+                        orient="records"
                     )
-                    context["factors"] = factors[
-                        ["ticker", "sector", "factor_score"]
-                    ].to_dict(orient="records")
                 except ValueError:
                     pass
         elif slug == "research-runs":
@@ -582,8 +733,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context["benchmarks"] = store.list_model_benchmarks(10)
         elif slug == "debate":
             decisions = store.query_df(
-                "SELECT decision_json FROM consensus_decisions "
-                "ORDER BY created_at DESC LIMIT 20"
+                "SELECT decision_json FROM consensus_decisions ORDER BY created_at DESC LIMIT 20"
             )
             context["decisions"] = [
                 _prepare_decision(_json_value(value))
@@ -591,10 +741,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ]
         elif slug == "portfolio":
             context["portfolio"] = store.current_portfolio()
+        elif slug == "my-holdings":
+            context["watchlist"] = list_watchlist_items()
         elif slug == "backtest":
             context["backtests"] = store.list_backtests(10)
         if slug == "backtest" and context["backtests"]:
             latest = context["backtests"][0]
+            context["backtest_analysis"] = _backtest_analysis(latest)
             frame = pd.DataFrame(latest.monthly_returns)
             if not frame.empty:
                 figure = go.Figure()
@@ -608,7 +761,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if column in frame:
                         figure.add_trace(
                             go.Scatter(
-                                x=frame["date"], y=(1 + frame[column]).cumprod(), name=column
+                                x=frame["date"],
+                                y=(1 + frame[column]).cumprod(),
+                                name=_display_strategy_name(column),
                             )
                         )
                 figure.update_layout(
@@ -623,9 +778,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/", response_class=HTMLResponse)
     async def root(request: Request):
         context = await asyncio.to_thread(page_context, "data-status")
-        return templates.TemplateResponse(
-            request=request, name="page.html", context=context
-        )
+        return templates.TemplateResponse(request=request, name="page.html", context=context)
 
     for path, slug in [
         ("/data-status", "data-status"),
@@ -633,15 +786,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ("/research-runs", "research-runs"),
         ("/debate", "debate"),
         ("/portfolio", "portfolio"),
+        ("/my-holdings", "my-holdings"),
         ("/backtest", "backtest"),
         ("/paper-trading", "paper-trading"),
     ]:
 
         async def render(request: Request, page_slug: str = slug):
             context = await asyncio.to_thread(page_context, page_slug)
-            return templates.TemplateResponse(
-                request=request, name="page.html", context=context
-            )
+            return templates.TemplateResponse(request=request, name="page.html", context=context)
 
         app.add_api_route(path, render, response_class=HTMLResponse, methods=["GET"], name=slug)
 

@@ -54,6 +54,18 @@ def test_daily_and_weekly_operations_are_deterministic(tmp_path: Path) -> None:
     assert weekly.result["turnover_cap"] == 0.05
 
 
+def test_daily_operation_automatically_normalizes_latest_store_date(tmp_path: Path) -> None:
+    store = build_synthetic_demo(tmp_path / "automatic-date.duckdb", tmp_path / "raw")
+    settings = Settings(
+        database_backend="duckdb", database_path=tmp_path / "automatic-date.duckdb", deepseek_api_key="test"
+    )
+
+    daily = asyncio.run(run_daily(store, settings))
+
+    assert daily.as_of_date == date(2026, 8, 31)
+    assert daily.result["candidates"]
+
+
 def test_full_cycle_stops_at_one_share_paper_approval_checkpoint(tmp_path: Path, monkeypatch) -> None:
     store = build_synthetic_demo(tmp_path / "demo.duckdb", tmp_path / "raw")
     settings = Settings(
