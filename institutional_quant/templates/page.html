@@ -34,6 +34,47 @@
     </header>
 
     {% if slug == 'data-status' %}
+    <section class="start-panel">
+      <div class="start-copy">
+        <p class="eyebrow">START HERE</p>
+        <h2>Upload a Capital IQ export</h2>
+        <p>Begin with one CSV/XLSX file. The platform validates the file, records its provenance, and guides you through factors, research and portfolio construction.</p>
+      </div>
+      <div class="start-badge"><span class="start-number">01</span><span>Data import</span></div>
+    </section>
+    <section class="panel guide-panel">
+      <div class="panel-title"><h2>Next steps</h2><span>One decision at a time</span></div>
+      <div class="guide-grid">
+        <a class="guide-step current" href="#ciq-import-form"><span>01</span><div><b>Import data</b><small>Upload the matching Capital IQ file.</small></div><strong>→</strong></a>
+        <a class="guide-step" href="/factor-lab"><span>02</span><div><b>Discover factors</b><small>Review coverage and the S&amp;P 500 ranking.</small></div><strong>→</strong></a>
+        <a class="guide-step" href="/research-runs"><span>03</span><div><b>Run research</b><small>Compare analysts, debate and consensus.</small></div><strong>→</strong></a>
+        <a class="guide-step" href="/portfolio"><span>04</span><div><b>Build the portfolio</b><small>Review target weights before paper trading.</small></div><strong>→</strong></a>
+      </div>
+    </section>
+    <section class="panel upload-panel"><div class="panel-title"><h2>Upload a Capital IQ export</h2><span>CSV/XLSX · validated before import</span></div>
+      <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
+        <label>Dataset<select name="dataset" required>
+          <option value="instruments">Instruments / current universe</option>
+          <option value="index_membership">Historical S&amp;P 500 membership</option>
+          <option value="fundamentals">Financial statements / fundamentals</option>
+          <option value="estimates">Consensus estimates / revisions</option>
+          <option value="prices">Adjusted prices / corporate actions</option>
+          <option value="ownership">Ownership</option>
+          <option value="insider_transactions">Insider transactions</option>
+        </select></label>
+        <label class="file-field">Capital IQ CSV/XLSX
+          <span class="file-picker">
+            <input id="ciq-file" name="file" type="file" accept=".csv,.xlsx,.xls" required>
+            <span class="file-picker-button">Choose file</span>
+            <span id="ciq-file-name">No file selected</span>
+          </span>
+        </label>
+        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"></label>
+        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"></label>
+        <button class="btn btn-primary" type="submit">Validate and import</button>
+      </form>
+      <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>
+    </section>
     <section class="{% if certified %}success{% else %}warning{% endif %}">
       <b>{% if certified %}Five-year research gate passed{% else %}Five-year research gate is not ready{% endif %}</b>
       {% if certification_notes %}<ul class="compact-list">{% for note in certification_notes %}<li>{{ note }}</li>{% endfor %}</ul>{% endif %}
@@ -50,28 +91,13 @@
       {% else %}<tr><td colspan="4" class="empty">No licensed exports imported yet.</td></tr>{% endfor %}
       </tbody></table>
     </section>
-    <section class="panel"><div class="panel-title"><h2>Import a Capital IQ export</h2><span>Local upload · immutable archive · SHA-256</span></div>
-      <form id="ciq-import-form" class="import-form" action="/api/v1/imports/ciq" method="post" enctype="multipart/form-data">
-        <label>Dataset<select name="dataset" required>
-          <option value="instruments">Instruments / current universe</option>
-          <option value="index_membership">Historical S&amp;P 500 membership</option>
-          <option value="fundamentals">Financial statements / fundamentals</option>
-          <option value="estimates">Consensus estimates / revisions</option>
-          <option value="prices">Adjusted prices / corporate actions</option>
-          <option value="ownership">Ownership</option>
-          <option value="insider_transactions">Insider transactions</option>
-        </select></label>
-        <label>Capital IQ CSV/XLSX<input name="file" type="file" accept=".csv,.xlsx,.xls" required></label>
-        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"></label>
-        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"></label>
-        <button class="btn btn-primary" type="submit">Validate and import</button>
-      </form>
-      <pre id="ciq-import-result" class="import-result">Select the matching dataset. Historical fundamentals, estimates, membership and prices must carry their own availability timestamps.</pre>
-    </section>
-    <section class="panel"><div class="panel-title"><h2>Data quality</h2><span>Point-in-time gates</span></div>
-      {% for issue in issues %}<div class="issue {{ issue.severity }}"><b>{{ issue.code }}</b><span>{{ issue.message }}</span></div>
-      {% else %}<div class="empty">No recorded issues. Certification still requires every required dataset and availability timestamp.</div>{% endfor %}
-    </section>
+    <details class="panel quality-panel">
+      <summary class="panel-title"><h2>Data quality</h2><span>{{ issues|length }} recorded checks · click to expand</span></summary>
+      <div class="quality-list">
+        {% for issue in issues %}<div class="issue {{ issue.severity }}"><b>{{ issue.code }}</b><span>{{ issue.message }}</span></div>
+        {% else %}<div class="empty">No recorded issues. Certification still requires every required dataset and availability timestamp.</div>{% endfor %}
+      </div>
+    </details>
 
     {% elif slug == 'factor-lab' %}
     {% if factor_readiness %}
@@ -160,6 +186,10 @@
         result.textContent = String(error);
         result.className = 'import-result failed';
       }
+    });
+    document.getElementById('ciq-file').addEventListener('change', (event) => {
+      const file = event.currentTarget.files[0];
+      document.getElementById('ciq-file-name').textContent = file ? file.name : 'No file selected';
     });
   </script>
   {% endif %}
