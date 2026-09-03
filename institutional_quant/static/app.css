@@ -212,10 +212,23 @@ tr:last-child td { border-bottom: 0; }
 
 .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; padding: 18px; }
 .decision { padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
-.decision > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.decision p { margin: 12px 0; color: #475467; }
+.decision-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.decision-summary { margin: 12px 0 14px; color: #475467; }
 .decision small { color: var(--muted); }
 .rating { padding: 3px 8px; border-radius: 999px; background: var(--success-soft); color: var(--success); font-size: 11px; font-weight: 800; }
+.evidence-strip { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.evidence-label { margin-right: 2px; color: var(--subtle); font-size: 10px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+.evidence-chip, .evidence-more { padding: 3px 7px; border: 1px solid #dbe5f5; border-radius: 999px; background: #f8faff; color: #47628c; font-size: 11px; line-height: 1.25; }
+.evidence-more { border-color: var(--line); background: #fff; color: var(--muted); }
+.evidence-details { margin: 0 0 12px; border-top: 1px solid #f0f2f5; }
+.evidence-details summary { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 9px 0 0; color: #526175; font-size: 11px; font-weight: 700; }
+.evidence-details summary::after { content: "+"; font-size: 16px; }
+.evidence-details[open] summary::after { content: "−"; }
+.evidence-detail-list { display: grid; gap: 6px; margin-top: 9px; }
+.evidence-detail { display: grid; grid-template-columns: minmax(100px, 1fr) auto; gap: 2px 8px; padding: 7px 8px; border-radius: 6px; background: #f8fafc; }
+.evidence-detail b { color: #344054; font-size: 11px; }
+.evidence-detail span { color: var(--muted); font-size: 10px; }
+.evidence-detail code { grid-column: 1 / -1; overflow-wrap: anywhere; color: var(--subtle); font: 10px/1.35 "SFMono-Regular", Consolas, monospace; }
 .mono { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; }
 .workflow { margin: 0; padding: 20px 44px 24px; color: #475467; }
 .workflow li { padding: 6px; }

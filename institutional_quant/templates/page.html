@@ -132,7 +132,24 @@
     {% elif slug == 'debate' %}
     <section class="panel"><div class="panel-title"><h2>Consensus decisions</h2><span>Independent analysts · two-round debate · judge</span></div>
       <div class="cards">
-      {% for row in decisions %}<article class="decision"><div><b>{{ row.ticker }}</b><span class="rating">{{ row.rating }}</span></div><p>{{ row.summary }}</p><small>Adjustment {{ '%+.3f'|format(row.score_adjustment) }} · {{ row.supporting_evidence|length }} evidence links</small></article>
+      {% for row in decisions %}<article class="decision">
+        <div class="decision-heading"><b>{{ row.ticker }}</b><span class="rating">{{ row.rating }}</span></div>
+        <p class="decision-summary">{{ row.summary_display or row.summary }}</p>
+        {% if row.evidence_refs %}
+        <div class="evidence-strip" aria-label="Evidence fields">
+          <span class="evidence-label">Evidence</span>
+          {% for ref in row.evidence_refs[:5] %}<span class="evidence-chip">{{ ref.label }}</span>{% endfor %}
+          {% if row.evidence_refs|length > 5 %}<span class="evidence-more">+{{ row.evidence_refs|length - 5 }} more</span>{% endif %}
+        </div>
+        <details class="evidence-details">
+          <summary>View {{ row.evidence_count }} evidence links</summary>
+          <div class="evidence-detail-list">
+          {% for ref in row.evidence_refs %}<div class="evidence-detail"><b>{{ ref.label }}</b><span>{{ ref.source_short }}</span><code>{{ ref.raw }}</code></div>{% endfor %}
+          </div>
+        </details>
+        {% endif %}
+        <small>Adjustment {{ '%+.3f'|format(row.score_adjustment) }} · {{ row.evidence_count }} evidence links</small>
+      </article>
       {% else %}<div class="empty">No evidence-grounded debate has completed.</div>{% endfor %}
       </div>
     </section>

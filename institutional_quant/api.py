@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import tempfile
 from contextlib import asynccontextmanager
@@ -51,6 +52,74 @@ def _json_value(value: Any) -> Any:
         except json.JSONDecodeError:
             return value
     return value
+
+
+_EVIDENCE_TOKEN = re.compile(r"src_[0-9a-z]+:[a-z0-9_]+", re.IGNORECASE)
+_EVIDENCE_BLOCK = re.compile(
+    r"\[(?:\s*src_[^,\]\s]+:[^,\]\s]+\s*,?)+\]", re.IGNORECASE
+)
+
+
+def _field_label(field: str) -> str:
+    """Turn an internal field name into a compact, reader-facing label."""
+    labels = {
+        "price_to_earnings": "P/E",
+        "price_to_book": "P/B",
+        "tev_ebitda": "TEV / EBITDA",
+        "ebitda": "EBITDA",
+        "ebitda_margin": "EBITDA Margin",
+        "eps_estimate": "EPS Estimate",
+        "eps_analyst_count_1m": "EPS Analysts (1M)",
+        "eps_up_revisions_1m": "EPS Up Revisions (1M)",
+        "eps_down_revisions_1m": "EPS Down Revisions (1M)",
+        "eps_up_revisions_3m": "EPS Up Revisions (3M)",
+        "eps_down_revisions_3m": "EPS Down Revisions (3M)",
+        "roic": "ROIC",
+        "return_on_equity": "ROE",
+        "return_on_assets": "ROA",
+        "sp_norm_eps_act_or_est": "S&P Norm EPS",
+    }
+    return labels.get(field, field.replace("_", " ").strip().title())
+
+
+def _prepare_decision(value: Any) -> Any:
+    """Add a clean display summary while preserving the audit evidence IDs."""
+    if not isinstance(value, dict):
+        return value
+
+    evidence = value.get("supporting_evidence") or []
+    evidence_refs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for raw in evidence:
+        raw_text = str(raw).strip()
+        source_id, separator, field = raw_text.partition(":")
+        if not separator or not source_id or not field or raw_text in seen:
+            continue
+        seen.add(raw_text)
+        evidence_refs.append(
+            {
+                "raw": raw_text,
+                "source_id": source_id,
+                "source_short": f"{source_id[:14]}…" if len(source_id) > 14 else source_id,
+                "field": field,
+                "label": _field_label(field),
+            }
+        )
+
+    summary = str(value.get("summary") or "").strip()
+    # Citation blocks are useful for audit but make the primary narrative hard to read.
+    display_summary = _EVIDENCE_BLOCK.sub("", summary)
+    display_summary = _EVIDENCE_TOKEN.sub("", display_summary)
+    display_summary = re.sub(r"\[\s*,?\s*\]", "", display_summary)
+    display_summary = re.sub(r"\s{2,}", " ", display_summary)
+    display_summary = re.sub(r"\s+\)", ")", display_summary)
+    display_summary = re.sub(r"\s+([,.;])", r"\1", display_summary).strip(" ,")
+
+    prepared = dict(value)
+    prepared["summary_display"] = display_summary or summary
+    prepared["evidence_refs"] = evidence_refs
+    prepared["evidence_count"] = len(evidence)
+    return prepared
 
 
 def _research_candidates(store: Store, as_of_date: date, requested: list[str]) -> pd.DataFrame:
@@ -410,7 +479,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "ORDER BY created_at DESC LIMIT 20"
             )
             context["decisions"] = [
-                _json_value(value) for value in decisions.get("decision_json", [])
+                _prepare_decision(_json_value(value))
+                for value in decisions.get("decision_json", [])
             ]
         elif slug == "portfolio":
             context["portfolio"] = store.current_portfolio()
