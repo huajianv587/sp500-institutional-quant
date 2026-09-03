@@ -1274,7 +1274,7 @@ def test_current_snapshot_requires_explicit_timestamps(tmp_path) -> None:
     settings = Settings(database_backend="duckdb", raw_data_dir=tmp_path / "raw")
     importer = CapitalIQImporter(store, settings)
 
-    with pytest.raises(ValueError, match="Both current_snapshot"):
+    with pytest.raises(ValueError, match="observed-at timestamp"):
         importer.import_file(
             source,
             DatasetKind.INSTRUMENTS,

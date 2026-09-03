@@ -91,8 +91,9 @@
             <span id="ciq-file-name">No file selected</span>
           </span>
         </label>
-        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"><small>For a current 1D / 1W / 1M export, this can be inferred from the filename.</small></label>
-        <label>Observed at (not historical)<input name="current_snapshot_effective_at" type="datetime-local"><small>Confirm when the export was available. Download time is not a substitute.</small></label>
+        <input id="ciq-timestamp-provenance" name="current_snapshot_timestamp_provenance" type="hidden" value="">
+        <label>Current snapshot as-of (not historical)<input name="current_snapshot_as_of" type="date"><small>For a 1D / 1W / 1M snapshot, this is filled from a YYYY-MM-DD filename when available.</small></label>
+        <label>Observed at / import time (current snapshot)<input name="current_snapshot_effective_at" type="datetime-local"><small>Automatically filled for current returns. Replace it with the Capital IQ export time when known.</small></label>
         <button class="btn btn-primary" type="submit">Validate and import</button>
       </form>
       <pre id="ciq-import-result" class="import-result">Select the matching dataset. A 1D / 1W / 1M percentage snapshot belongs to market_returns; adjusted prices require historical OHLC and adjusted-close fields.</pre>
@@ -218,9 +219,41 @@
     const importForm = document.getElementById('ciq-import-form');
     const snapshotAsOf = importForm.querySelector('[name="current_snapshot_as_of"]');
     const snapshotEffectiveAt = importForm.querySelector('[name="current_snapshot_effective_at"]');
+    const timestampProvenance = document.getElementById('ciq-timestamp-provenance');
+    const uploadFile = document.getElementById('ciq-file');
+    const localDatetimeValue = () => {
+      const now = new Date();
+      const pad = (value) => String(value).padStart(2, '0');
+      return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    };
+    const applyMarketReturnDefaults = (file) => {
+      if (!file || !/returns[_-]?1d[_-]?1w[_-]?1m/i.test(file.name)) return;
+      datasetSelect.value = 'market_returns';
+      const match = file.name.match(/(20\d{2})[-_](\d{2})[-_](\d{2})/);
+      if (match && !snapshotAsOf.value) snapshotAsOf.value = `${match[1]}-${match[2]}-${match[3]}`;
+      if (!snapshotEffectiveAt.value) {
+        snapshotEffectiveAt.value = localDatetimeValue();
+        timestampProvenance.value = 'browser_inferred_import_timestamp';
+      }
+    };
+    snapshotEffectiveAt.addEventListener('input', () => {
+      if (snapshotEffectiveAt.value) timestampProvenance.value = 'operator_confirmed_export_timestamp';
+    });
     importForm.addEventListener('submit', async (event) => {
       event.preventDefault();
       const result = document.getElementById('ciq-import-result');
+      if (datasetSelect.value === 'market_returns') {
+        applyMarketReturnDefaults(uploadFile.files[0]);
+        if (!snapshotAsOf.value) {
+          result.textContent = 'Add YYYY-MM-DD to the filename or enter the snapshot as-of date.';
+          result.className = 'import-result failed';
+          return;
+        }
+        if (!snapshotEffectiveAt.value) {
+          snapshotEffectiveAt.value = localDatetimeValue();
+          timestampProvenance.value = 'browser_inferred_import_timestamp';
+        }
+      }
       if (datasetSelect.value === 'prices' && (snapshotAsOf.value || snapshotEffectiveAt.value)) {
         result.textContent = 'Choose Current market returns (1D / 1W / 1M) for a percentage snapshot. Adjusted prices require historical price_date/effective_at fields.';
         result.className = 'import-result failed';
@@ -232,20 +265,18 @@
           method: 'POST', body: new FormData(event.currentTarget)
         });
         const payload = await response.json();
-        result.textContent = JSON.stringify(payload, null, 2);
+        result.textContent = response.ok
+          ? `Imported ${payload.imported_rows} rows. Source file: ${payload.source_file_id}${payload.idempotent ? ' (already imported)' : ''}.`
+          : `Import blocked: ${payload.detail || 'The server could not validate this file.'}`;
         result.className = 'import-result ' + (response.ok ? 'ok' : 'failed');
       } catch (error) {
         result.textContent = String(error);
         result.className = 'import-result failed';
       }
     });
-    document.getElementById('ciq-file').addEventListener('change', (event) => {
+    uploadFile.addEventListener('change', (event) => {
       const file = event.currentTarget.files[0];
-      if (file && /returns[_-]?1d[_-]?1w[_-]?1m/i.test(file.name)) {
-        datasetSelect.value = 'market_returns';
-        const match = file.name.match(/(20\d{2})[-_](\d{2})[-_](\d{2})/);
-        if (match && !snapshotAsOf.value) snapshotAsOf.value = `${match[1]}-${match[2]}-${match[3]}`;
-      }
+      applyMarketReturnDefaults(file);
       document.getElementById('ciq-file-name').textContent = file ? file.name : 'No file selected';
     });
     document.querySelectorAll('.cadence-button').forEach((button) => {

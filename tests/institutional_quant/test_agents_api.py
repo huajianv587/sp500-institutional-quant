@@ -265,6 +265,35 @@ def test_dashboard_and_health_use_duckdb_fixture(tmp_path) -> None:
         assert "Five-year research gate is not ready" in page.text
         assert "Upload a Capital IQ export" in page.text
         assert 'action="/api/v1/imports/ciq"' in page.text
+        assert "Automatically filled for current returns" in page.text
+
+
+def test_current_market_returns_upload_infers_missing_snapshot_timestamps(tmp_path) -> None:
+    settings = Settings(
+        database_backend="duckdb",
+        database_path=tmp_path / "api-import.duckdb",
+        raw_data_dir=tmp_path / "raw",
+        report_dir=tmp_path / "reports",
+    )
+    export = (
+        "Entity ID,Ticker,Price Change (%),Price Change (%).1,Price Change (%).2\n"
+        "C1,AAA,1.0,2.0,3.0\n"
+    )
+    with TestClient(create_app(settings)) as client:
+        response = client.post(
+            "/api/v1/imports/ciq",
+            data={"dataset": "market_returns"},
+            files={
+                "file": (
+                    "ciq_sp500_returns_1d_1w_1m_2026-09-03.csv",
+                    export,
+                    "text/csv",
+                )
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["imported_rows"] == 1
 
 
 def test_alpaca_preview_requires_unchanged_explicit_approval() -> None:

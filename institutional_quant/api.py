@@ -243,17 +243,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         file: Annotated[UploadFile, File()],
         current_snapshot_as_of: Annotated[date | None, Form()] = None,
         current_snapshot_effective_at: Annotated[datetime | None, Form()] = None,
+        current_snapshot_timestamp_provenance: Annotated[str | None, Form()] = None,
     ):
         suffix = Path(file.filename or "export.csv").suffix
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as temporary:
             shutil.copyfileobj(file.file, temporary)
             path = Path(temporary.name)
         try:
+            timestamp_provenance = current_snapshot_timestamp_provenance
+            if dataset is DatasetKind.MARKET_RETURNS:
+                filename = file.filename or ""
+                inferred_as_of = False
+                inferred_effective_at = False
+                if current_snapshot_as_of is None:
+                    match = re.search(r"(20\d{2})[-_](\d{2})[-_](\d{2})", filename)
+                    if match:
+                        current_snapshot_as_of = date(
+                            int(match.group(1)), int(match.group(2)), int(match.group(3))
+                        )
+                        inferred_as_of = True
+                if current_snapshot_effective_at is None:
+                    current_snapshot_effective_at = datetime.now().astimezone().replace(tzinfo=None)
+                    inferred_effective_at = True
+                if inferred_as_of and inferred_effective_at:
+                    timestamp_provenance = "server_inferred_filename_date_and_upload_timestamp"
+                elif inferred_as_of:
+                    timestamp_provenance = "server_inferred_filename_date"
+                elif inferred_effective_at:
+                    timestamp_provenance = "server_inferred_upload_timestamp"
             result = CapitalIQImporter(store, settings).import_file(
                 path,
                 dataset,
                 current_snapshot_as_of=current_snapshot_as_of,
                 current_snapshot_effective_at=current_snapshot_effective_at,
+                current_snapshot_timestamp_provenance=timestamp_provenance,
             )
             return result
         except (ValueError, RuntimeError) as exc:

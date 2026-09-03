@@ -1001,6 +1001,7 @@ class CapitalIQImporter:
         *,
         current_snapshot_as_of: date | None = None,
         current_snapshot_effective_at: datetime | None = None,
+        current_snapshot_timestamp_provenance: str | None = None,
     ) -> ImportResult:
         current_snapshot = any(
             value is not None for value in (current_snapshot_as_of, current_snapshot_effective_at)
@@ -1017,10 +1018,14 @@ class CapitalIQImporter:
                     "Current-snapshot timestamps are permitted only for instruments, "
                     "fundamentals, estimates, and market_returns"
                 )
-            if current_snapshot_as_of is None or current_snapshot_effective_at is None:
+            if current_snapshot_as_of is None and current_snapshot_effective_at is None:
                 raise ValueError(
-                    "Both current_snapshot_as_of and current_snapshot_effective_at are required"
+                    "A current snapshot needs both an as-of date and an observed-at timestamp"
                 )
+            if current_snapshot_as_of is None:
+                raise ValueError("A current snapshot needs an as-of date")
+            if current_snapshot_effective_at is None:
+                raise ValueError("A current snapshot needs an observed-at timestamp")
         if self.store.is_cloud and not self.settings.ciq_cloud_storage_confirmed:
             raise RuntimeError(
                 "Set CIQ_CLOUD_STORAGE_CONFIRMED=true only after confirming that "
@@ -1294,7 +1299,8 @@ class CapitalIQImporter:
                 "columns": list(selected.columns),
                 "source_scope": "current_snapshot" if current_snapshot else "point_in_time_export",
                 "timestamp_provenance": (
-                    "operator_supplied_export_timestamp"
+                    current_snapshot_timestamp_provenance
+                    or "operator_supplied_export_timestamp"
                     if current_snapshot
                     else "embedded_spg_formula_and_source_columns"
                     if source_metadata.get("embedded_as_of_date")
